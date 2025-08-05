@@ -55,6 +55,7 @@ jobs:
         working-directory: ./dep_checker
         run: |
           matrix=$(grep -o '{.*}' result.log | jq -c .)
+          echo "matrix=$matrix"
           echo "matrix=$matrix" >> $GITHUB_OUTPUT
 
   create-issues:
