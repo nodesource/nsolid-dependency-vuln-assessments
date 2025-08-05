@@ -40,6 +40,20 @@ def get_brotli_version(repo_path: Path) -> str:
         versions = matches.groupdict()
         return f"{versions['major']}.{versions['minor']}.{versions['patch']}"
 
+def get_node_version(repo_path: Path) -> str:
+    """
+    Parses src/node_version.h and returns the Node.js version as a string (e.g., '20.19.4').
+    """
+    version_file = repo_path / "src/node_version.h"
+    with open(version_file, "r") as f:
+        content = f.read()
+        major = re.search(r"#define NODE_MAJOR_VERSION (\d+)", content)
+        minor = re.search(r"#define NODE_MINOR_VERSION (\d+)", content)
+        patch = re.search(r"#define NODE_PATCH_VERSION (\d+)", content)
+        if not (major and minor and patch):
+            raise RuntimeError(f"Error extracting Node.js version from {version_file}")
+        return f"{major.group(1)}.{minor.group(1)}.{patch.group(1)}"
+
 
 def get_c_ares_version(repo_path: Path) -> str:
     with open(repo_path / "deps/cares/include/ares_version.h", "r") as f:
@@ -242,3 +256,22 @@ def get_ada_version(repo_path: Path) -> str:
         if matches is None:
             raise RuntimeError("Error extracting version number for ada")
         return matches.groupdict()["version"]
+
+
+def get_curl_version(repo_path: Path) -> str:
+    with open(repo_path / "deps/curl/include/curl/curlver.h", "r") as f:
+        matches = re.search('#define LIBCURL_VERSION "(?P<version>.*)"', f.read())
+        if matches is None:
+            raise RuntimeError("Error extracting version number for curl")
+        return matches.groupdict()["version"]
+
+
+def get_zmq_version(repo_path: Path) -> str:
+    with open(repo_path / "deps/zmq/include/zmq.h", "r") as f:
+        content = f.read()
+        major = re.search(r'#define ZMQ_VERSION_MAJOR (\d+)', content)
+        minor = re.search(r'#define ZMQ_VERSION_MINOR (\d+)', content)
+        patch = re.search(r'#define ZMQ_VERSION_PATCH (\d+)', content)
+        if not (major and minor and patch):
+            raise RuntimeError("Error extracting version number for zmq")
+        return f"{major.group(1)}.{minor.group(1)}.{patch.group(1)}"
