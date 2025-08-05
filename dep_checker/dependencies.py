@@ -55,13 +55,22 @@ common_dependencies: list[str] = [
     "uvwasi",
     "undici",
     "zlib",
+    "zmq",
+    "nsuv",
+    "opentelemetry-cpp",
+    "ncm-ng",
+    "nsolid-cli",
+    "curl"
 ]
 
+# Define branch-specific dependencies
+main_specific = ["simdutf"]
+v22_specific = ["simdutf"]
+
+# Combine common dependencies with branch-specific ones
 dependencies_per_branch: dict[str, list[str]] = {
-    "main": common_dependencies,
-    "v24.x": common_dependencies,
-    "v22.x": common_dependencies,
-    "v20.x": common_dependencies,
+    "node-v20.x-nsolid-v5.x": common_dependencies,
+    "node-v22.x-nsolid-v5.x": common_dependencies + v22_specific,
 }
 
 
@@ -70,6 +79,10 @@ dependencies_info: dict[str, Dependency] = {
         version_parser=vp.get_ada_version,
         cpe=CPE(vendor="ada-url", product="ada"),
     ),
+    "curl": Dependency(
+        version_parser=vp.get_curl_version,
+        cpe=CPE(vendor="haxx", product="curl"),
+    ),
     "simdutf": Dependency(
         version_parser=vp.get_simdutf_version,
         cpe=CPE(vendor="simdutf", product="simdutf"),
@@ -77,6 +90,10 @@ dependencies_info: dict[str, Dependency] = {
     "zlib": Dependency(
         version_parser=vp.get_zlib_version,
         cpe=CPE(vendor="zlib", product="zlib"),
+    ),
+    "zmq": Dependency(
+        version_parser=vp.get_zmq_version,
+        cpe=CPE(vendor="zeromq", product="libzmq"),
     ),
     # TODO: Add V8
     # "V8": Dependency("cpe:2.3:a:google:chrome:*:*:*:*:*:*:*:*", "v8"),
@@ -130,8 +147,11 @@ dependencies_info: dict[str, Dependency] = {
         npm_name="corepack",
     ),
     "CJS Module Lexer": Dependency(
-        version_parser=lambda repo_path: vp.get_cjs_lexer_version_old(repo_path) \
-            if "v20" in str(repo_path) else vp.get_cjs_lexer_version(repo_path),
+        version_parser=lambda repo_path: (
+            vp.get_cjs_lexer_version(repo_path) 
+            if int(vp.get_node_version(repo_path).split(".")[0]) > 20 
+            else vp.get_cjs_lexer_version_old(repo_path)
+        ),
         cpe=None,
         keyword="cjs-module-lexer",
         npm_name="cjs-module-lexer",
