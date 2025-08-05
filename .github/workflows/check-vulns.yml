@@ -3,7 +3,7 @@ name: Reusable flow to check for vulns in dependencies of a Node.js branch
 on:
   workflow_call:
     inputs:
-      nodejsStream:
+      nsolidStream:
         type: string
         default: 'main'
     secrets:
@@ -11,7 +11,7 @@ on:
         required: true
   workflow_dispatch:
     inputs:
-      nodejsStream:
+      nsolidStream:
         type: string
         default: 'main'
 
@@ -26,10 +26,10 @@ jobs:
     outputs:
       matrix: ${{ steps.set_matrix.outputs.matrix }}
     steps:
-      - name: Setup Python 3.9
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'
       - name: Checkout current repository
         uses: actions/checkout@v4
       - name: Installing pre-reqs
@@ -38,15 +38,15 @@ jobs:
       - name: Checkout node.js repo
         uses: actions/checkout@v4
         with:
-          repository: nodejs/node
-          path: node
-          ref: ${{ inputs.nodejsStream }}
+          repository: nodesource/nsolid
+          path: nsolid
+          ref: ${{ inputs.nsolidStream }}
       - name: Run the check
         working-directory: ./dep_checker
         run: |
           (
             set -o pipefail
-            python main.py --json-output --gh-token ${{ secrets.GITHUB_TOKEN }} --nvd-key=${{ secrets.NVD_API_KEY }} ../node ${{ inputs.nodejsStream }} 2>&1 | tee result.log
+            python main.py --json-output --gh-token ${{ secrets.GITHUB_TOKEN }} --nvd-key=${{ secrets.NVD_API_KEY }} ../nsolid ${{ inputs.nsolidStream }} 2>&1 | tee result.log
           )
       - name: build matrix
         id: set_matrix
@@ -75,5 +75,5 @@ jobs:
           VULN_URL: ${{ matrix.vulnerabilities.url }}
           VULN_DEP_NAME: ${{ matrix.vulnerabilities.dependency }}
           VULN_DEP_VERSION: ${{ matrix.vulnerabilities.version }}
-          NODEJS_STREAM: ${{ inputs.nodejsStream }}
+          NODEJS_STREAM: ${{ inputs.nsolidStream }}
           ACTION_URL: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"

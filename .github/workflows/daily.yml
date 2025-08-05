@@ -10,24 +10,15 @@ permissions:
   issues: write
 
 jobs:
-  get-supported-versions:
-    runs-on: ubuntu-latest
-    outputs:
-      # JSON array of versions to check, e.g. '["v14.x","v16.x","v18.x","v19.x","main"]'
-      matrix: ${{ steps.fetch-versions.outputs.matrix }}
-    steps:
-      - id: fetch-versions
-        run: echo "matrix=$(npx -p @pkgjs/nv nv ls supported | jq -c -n '[inputs.versionName + ".x"] | . += ["main"]')" >> $GITHUB_OUTPUT
   check-vulns:
-    name: Check vulnerabilities on ${{ matrix.nodejsStream }}
-    needs: get-supported-versions
+    name: Check vulnerabilities on ${{ matrix.nsolidStream }}
     secrets: inherit
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        nodejsStream: ${{ fromJSON(needs.get-supported-versions.outputs.matrix) }}
+        nsolidStream: ["node-v20.x-nsolid-v5.x", "node-v22.x-nsolid-v5.x"]
     uses: ./.github/workflows/check-vulns.yml
     with:
-      nodejsStream: ${{ matrix.nodejsStream }}
+      nsolidStream: ${{ matrix.nsolidStream }}
 
