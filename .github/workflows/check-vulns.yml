@@ -1,4 +1,4 @@
-name: Reusable flow to check for vulns in dependencies of a Node.js branch
+name: Reusable flow to check for vulns in dependencies of a Nsolid branch
 
 on:
   workflow_call:
@@ -35,7 +35,7 @@ jobs:
       - name: Installing pre-reqs
         working-directory: ./dep_checker
         run: pip install -r requirements.txt
-      - name: Checkout node.js repo
+      - name: Checkout Nsolid repo
         uses: actions/checkout@v4
         with:
           repository: nodesource/nsolid
@@ -48,6 +48,7 @@ jobs:
             set -o pipefail
             python main.py --json-output --gh-token ${{ secrets.GITHUB_TOKEN }} --nvd-key=${{ secrets.NVD_API_KEY }} ../nsolid ${{ inputs.nsolidStream }} 2>&1 | tee result.log
           )
+          cat result.log
       - name: build matrix
         id: set_matrix
         if: ${{ failure() }}
