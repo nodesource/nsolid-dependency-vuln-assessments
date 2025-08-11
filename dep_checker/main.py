@@ -22,29 +22,52 @@ from gql import gql, Client
 from gql.transport.aiohttp import AIOHTTPTransport
 from nvdlib import searchCVE  # type: ignore
 from packaging.specifiers import SpecifierSet
-from typing import Optional
+from typing import Optional, List
 from pathlib import Path
 
 import json
+import logging
 
 
 class Vulnerability:
-    def __init__(self, id: str, url: str, dependency: str, version: str):
+    def __init__(self, id: str, url: str, dependency: str, version: str, source: str = "binary", 
+                 severity: Optional[str] = None, via: Optional[list] = None, 
+                 fix_available: Optional[bool] = None, main_dep_name: Optional[str] = None,
+                 main_dep_path: Optional[str] = None):
         self.id = id
         self.url = url
         self.dependency = dependency
         self.version = version
+        self.source = source  # "binary" or "npm"
+        self.severity = severity  # npm audit severity levels
+        self.via = via or []  # npm audit vulnerability chain
+        self.fix_available = fix_available  # whether fix is available
+        self.main_dep_name = main_dep_name  # main dependency name for npm vulnerabilities
+        self.main_dep_path = main_dep_path  # path to the main dependency
 
 
 class VulnerabilityEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Vulnerability):
-            return {
+            result = {
                 "id": obj.id,
                 "url": obj.url,
                 "dependency": obj.dependency,
                 "version": obj.version,
+                "source": obj.source,
             }
+            # Add npm-specific fields if they exist
+            if obj.severity is not None:
+                result["severity"] = obj.severity
+            if obj.via:
+                result["via"] = obj.via
+            if obj.main_dep_name is not None:
+                result["main_dep_name"] = obj.main_dep_name
+            if obj.main_dep_path is not None:
+                result["main_dep_path"] = obj.main_dep_path
+            if obj.fix_available is not None:
+                result["fix_available"] = obj.fix_available
+            return result
         # Let the base class default method raise the TypeError
         return json.JSONEncoder.default(self, obj)
 
@@ -162,14 +185,38 @@ def query_nvd(
         ]
         if query_results:
             version = dep.version_parser(repo_path)
-            found_vulnerabilities.extend(
-                [
+            for cve in query_results:
+                # Extract severity from CVE metrics
+                severity = None
+                try:
+                    # Try to get CVSS v3 base severity first
+                    if hasattr(cve, 'metrics') and cve.metrics:
+                        if hasattr(cve.metrics, 'cvssMetricV31') and cve.metrics.cvssMetricV31:
+                            severity = cve.metrics.cvssMetricV31[0].cvssData.baseSeverity
+                        elif hasattr(cve.metrics, 'cvssMetricV30') and cve.metrics.cvssMetricV30:
+                            severity = cve.metrics.cvssMetricV30[0].cvssData.baseSeverity
+                        elif hasattr(cve.metrics, 'cvssMetricV2') and cve.metrics.cvssMetricV2:
+                            # CVSS v2 doesn't have baseSeverity, so we'll derive it from baseScore
+                            base_score = cve.metrics.cvssMetricV2[0].cvssData.baseScore
+                            if base_score >= 7.0:
+                                severity = "HIGH"
+                            elif base_score >= 4.0:
+                                severity = "MEDIUM"
+                            else:
+                                severity = "LOW"
+                except (AttributeError, IndexError, TypeError):
+                    # If we can't extract severity, leave it as None
+                    pass
+                
+                found_vulnerabilities.append(
                     Vulnerability(
-                        id=cve.id, url=cve.url, dependency=name, version=version
+                        id=cve.id, 
+                        url=cve.url, 
+                        dependency=name, 
+                        version=version,
+                        severity=severity
                     )
-                    for cve in query_results
-                ]
-            )
+                )
 
     return found_vulnerabilities
 
@@ -201,13 +248,27 @@ def main() -> int:
     parser.add_argument(
         "--json-output",
         action="store_true",
-        help="the NVD API key for querying the National Vulnerability Database",
+        help="output results in JSON format",
     )
-    repo_path: Path = parser.parse_args().node_repo_path
-    repo_branch: str = parser.parse_args().node_repo_branch
-    gh_token = parser.parse_args().gh_token
-    nvd_key = parser.parse_args().nvd_key
-    json_output: bool = parser.parse_args().json_output
+    parser.add_argument(
+        "--include-npm",
+        action="store_true",
+        help="include npm package vulnerability scanning using npm audit",
+    )
+    parser.add_argument(
+        "--npm-timeout",
+        type=int,
+        default=300,
+        help="timeout in seconds for npm operations (default: 300)",
+    )
+    args = parser.parse_args()
+    repo_path: Path = args.node_repo_path
+    repo_branch: str = args.node_repo_branch
+    gh_token = args.gh_token
+    nvd_key = args.nvd_key
+    json_output: bool = args.json_output
+    include_npm: bool = args.include_npm
+    npm_timeout: int = args.npm_timeout
     if not repo_path.exists() or not (repo_path / ".git").exists():
         raise RuntimeError(
             "Invalid argument: '{repo_path}' is not a valid Node git repository"
@@ -237,10 +298,29 @@ def main() -> int:
         dependencies, nvd_key, repo_path
     )
 
+    # NPM package vulnerability checking
+    npm_vulnerabilities: list[Vulnerability] = []
+    if include_npm:
+        try:
+            # Configure logging for npm audit
+            logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            
+            from npm_audit import NPMAuditChecker
+            print("Running npm package vulnerability audit...")
+            npm_checker = NPMAuditChecker(repo_path, npm_timeout)
+            npm_vulnerabilities = npm_checker.check_npm_vulnerabilities(Vulnerability)
+            print(f"Found {len(npm_vulnerabilities)} npm package vulnerabilities")
+        except ImportError as e:
+            print(f"Warning: npm_audit module not found, skipping npm vulnerability checking: {e}")
+        except Exception as e:
+            print(f"Warning: npm vulnerability checking failed: {e}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+
     all_vulnerabilities = {
-        "vulnerabilities": ghad_vulnerabilities + nvd_vulnerabilities
+        "vulnerabilities": ghad_vulnerabilities + nvd_vulnerabilities + npm_vulnerabilities
     }
-    no_vulnerabilities_found = not ghad_vulnerabilities and not nvd_vulnerabilities
+    no_vulnerabilities_found = not ghad_vulnerabilities and not nvd_vulnerabilities and not npm_vulnerabilities
     if json_output:
         print(json.dumps(all_vulnerabilities, cls=VulnerabilityEncoder))
         return 0 if no_vulnerabilities_found else 1
