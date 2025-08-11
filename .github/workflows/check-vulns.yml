@@ -30,8 +30,28 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - name: Verify Node.js and npm installation
+        run: |
+          echo "Node.js version:"
+          node --version
+          echo "npm version:"
+          npm --version
+          echo "Python version:"
+          python3 --version
       - name: Checkout current repository
         uses: actions/checkout@v4
+      - name: Debug directory structure
+        run: |
+          echo "Current directory:"
+          pwd
+          echo "Directory contents:"
+          ls -la
+          echo "dep_checker directory exists:"
+          ls -la dep_checker/ || echo "dep_checker directory not found"
       - name: Installing pre-reqs
         working-directory: ./dep_checker
         run: pip install -r requirements.txt
@@ -46,7 +66,7 @@ jobs:
         run: |
           (
             set -o pipefail
-            python main.py --json-output --gh-token ${{ secrets.GITHUB_TOKEN }} --nvd-key=${{ secrets.NVD_API_KEY }} ../nsolid ${{ inputs.nsolidStream }} 2>&1 | tee result.log
+            python3 main.py --json-output --include-npm --npm-timeout 600 --gh-token ${{ secrets.GITHUB_TOKEN }} --nvd-key=${{ secrets.NVD_API_KEY }} ../nsolid ${{ inputs.nsolidStream }} 2>&1 | tee result.log
           )
           cat result.log
       - name: build matrix
@@ -54,8 +74,13 @@ jobs:
         if: ${{ failure() }}
         working-directory: ./dep_checker
         run: |
-          matrix=$(grep -o '{.*}' result.log | jq -c .)
-          echo "matrix=$matrix"
+          # Extract vulnerabilities JSON from the log
+          vulnerabilities_json=$(grep -o '{.*}' result.log | tail -1)
+          echo "Raw vulnerabilities JSON: $vulnerabilities_json"
+          
+          # Use the matrix formatter to build the complete matrix with labels
+          matrix=$(python3 ../.github/workflows/format_matrix.py "$vulnerabilities_json" "${{ inputs.nsolidStream }}")
+          echo "Formatted matrix: $matrix"
           echo "matrix=$matrix" >> $GITHUB_OUTPUT
 
   create-issues:
@@ -67,15 +92,28 @@ jobs:
       max-parallel: 1
     steps:
       - uses: actions/checkout@v4
-      - uses: dblock/create-a-github-issue@v3
-        with:
-          update_existing: false
-          search_existing: open
+      - name: Debug matrix data
+        run: |
+          echo "Matrix vulnerability data:"
+          echo "ID: ${{ matrix.vulnerabilities.id }}"
+          echo "Dependency: ${{ matrix.vulnerabilities.dependency }}"
+          echo "Source: ${{ matrix.vulnerabilities.source }}"
+          echo "Labels: ${{ join(matrix.vulnerabilities.labels, ', ') }}"
+          echo "ISSUE_LABELS: ${{ join(matrix.vulnerabilities.labels, ',') }}"
+      
+      - name: Create or update GitHub issue
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           VULN_ID: ${{ matrix.vulnerabilities.id }}
           VULN_URL: ${{ matrix.vulnerabilities.url }}
           VULN_DEP_NAME: ${{ matrix.vulnerabilities.dependency }}
           VULN_DEP_VERSION: ${{ matrix.vulnerabilities.version }}
+          VULN_SOURCE: ${{ matrix.vulnerabilities.source }}
+          VULN_MAIN_DEP_NAME: ${{ matrix.vulnerabilities.main_dep_name }}
+          VULN_MAIN_DEP_PATH: ${{ matrix.vulnerabilities.main_dep_path }}
           NODEJS_STREAM: ${{ inputs.nsolidStream }}
           ACTION_URL: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          LABELS: ${{ join(matrix.vulnerabilities.labels, ',') }}
+        run: |
+          .github/workflows/create_issue.sh
