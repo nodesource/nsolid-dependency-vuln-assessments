@@ -21,6 +21,7 @@ VULN_URL="${VULN_URL}"
 VULN_DEP_NAME="${VULN_DEP_NAME}"
 VULN_DEP_VERSION="${VULN_DEP_VERSION}"
 VULN_SOURCE="${VULN_SOURCE}"
+VULN_TITLE="${VULN_TITLE:-}"
 VULN_MAIN_DEP_NAME="${VULN_MAIN_DEP_NAME:-}"
 VULN_MAIN_DEP_PATH="${VULN_MAIN_DEP_PATH:-}"
 NODEJS_STREAM="${NODEJS_STREAM}"
@@ -34,6 +35,12 @@ ISSUE_TITLE="${VULN_ID} (${VULN_DEP_NAME}) found on ${NODEJS_STREAM}"
 ISSUE_BODY="A new vulnerability for ${VULN_DEP_NAME} ${VULN_DEP_VERSION} was found:
 Vulnerability ID: ${VULN_ID}
 Vulnerability URL: ${VULN_URL}"
+
+# Add vulnerability title if available
+if [ -n "${VULN_TITLE}" ]; then
+    ISSUE_BODY="${ISSUE_BODY}
+Vulnerability Title: ${VULN_TITLE}"
+fi
 
 # Add npm-specific info if applicable
 if [ "${VULN_SOURCE}" = "npm" ] && [ -n "${VULN_MAIN_DEP_NAME}" ]; then

@@ -110,6 +110,7 @@ jobs:
           VULN_DEP_NAME: ${{ matrix.vulnerabilities.dependency }}
           VULN_DEP_VERSION: ${{ matrix.vulnerabilities.version }}
           VULN_SOURCE: ${{ matrix.vulnerabilities.source }}
+          VULN_TITLE: ${{ matrix.vulnerabilities.title }}
           VULN_MAIN_DEP_NAME: ${{ matrix.vulnerabilities.main_dep_name }}
           VULN_MAIN_DEP_PATH: ${{ matrix.vulnerabilities.main_dep_path }}
           NODEJS_STREAM: ${{ inputs.nsolidStream }}

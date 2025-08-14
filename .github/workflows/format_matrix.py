@@ -23,6 +23,10 @@ def generate_labels_for_vulnerability(vuln: Dict[str, Any], nsolid_stream: str) 
     if vuln.get("source") == "npm":
         labels.append("NPM")
     
+    # Add Main Dependency label if main_dep_name is present
+    if vuln.get("main_dep_name") and vuln.get("main_dep_name") != "null":
+        labels.append("Main Dependency")
+    
     # Add severity label if available
     severity = vuln.get("severity")
     if severity and severity != "null":
@@ -70,6 +74,9 @@ def build_vulnerability_matrix(vulnerabilities_data: Dict[str, Any], nsolid_stre
             matrix_entry["severity"] = vuln["severity"]
         if "via" in vuln and vuln["via"]:
             matrix_entry["via"] = vuln["via"]
+            # Extract title from via array for display purposes
+            if isinstance(vuln["via"], list) and vuln["via"]:
+                matrix_entry["title"] = vuln["via"][0] if vuln["via"][0] else ""
         if "main_dep_name" in vuln and vuln["main_dep_name"] is not None:
             matrix_entry["main_dep_name"] = vuln["main_dep_name"]
         if "main_dep_path" in vuln and vuln["main_dep_path"] is not None:

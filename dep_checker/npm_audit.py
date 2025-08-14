@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # You can also use folder names for broader exclusions (e.g., "test" excludes all test folders)
 EXCLUDE_PATHS = [
     # Specific path exclusions
-    "deps/v8/tools/turbolizer",
+    "deps/v8/tools",
 
     # General folder name exclusions (will match any folder with this name)
     "test",
@@ -179,37 +179,80 @@ class NPMAuditChecker:
                         severity = vuln_data.get("severity", "unknown")
                         via = vuln_data.get("via", [])
                         fix_available = vuln_data.get("fixAvailable", False)
-                        
-                        # Handle different via formats
-                        if isinstance(via, list) and via:
-                            # Get the first vulnerability ID from via
-                            first_via = via[0]
-                            if isinstance(first_via, dict):
-                                vuln_id = first_via.get("source", f"npm-{vuln_name}")
-                                url = first_via.get("url", f"https://npmjs.com/advisories/{vuln_id}")
-                            else:
-                                vuln_id = str(first_via)
-                                url = f"https://npmjs.com/advisories/{vuln_id}"
-                        else:
-                            vuln_id = f"npm-{vuln_name}"
-                            url = f"https://npmjs.com/package/{vuln_name}"
-                        
-                        # Get version range
                         range_info = vuln_data.get("range", "unknown")
                         
-                        vulnerability = vulnerability_class(
-                            id=vuln_id,
-                            url=url,
-                            dependency=vuln_name,
-                            version=str(range_info),
-                            source="npm",
-                            severity=severity,
-                            via=[str(v) for v in via] if via else [],
-                            fix_available=bool(fix_available),
-                            main_dep_name=main_dep_name,
-                            main_dep_path=main_dep_path
-                        )
-                        vulnerabilities.append(vulnerability)
+                        # Handle different via formats - create separate vulnerabilities for each advisory
+                        if isinstance(via, list) and via:
+                            for via_item in via:
+                                if isinstance(via_item, dict):
+                                    # Extract individual advisory information
+                                    advisory_id = via_item.get("source")
+                                    advisory_url = via_item.get("url")
+                                    advisory_title = via_item.get("title", "")
+                                    advisory_severity = via_item.get("severity", severity)
+                                    
+                                    # Use advisory ID as vulnerability ID, fallback to package name
+                                    if advisory_id:
+                                        vuln_id = str(advisory_id)
+                                    else:
+                                        vuln_id = f"npm-{vuln_name}"
+                                    
+                                    # Use proper GitHub advisory URL if available
+                                    if advisory_url:
+                                        url = advisory_url
+                                    else:
+                                        url = f"https://github.com/advisories?query={vuln_name}"
+                                    
+                                    # Create vulnerability with advisory-specific information
+                                    vulnerability = vulnerability_class(
+                                        id=vuln_id,
+                                        url=url,
+                                        dependency=vuln_name,
+                                        version=str(range_info),
+                                        source="npm",
+                                        severity=advisory_severity,
+                                        via=[advisory_title] if advisory_title else [],
+                                        fix_available=bool(fix_available),
+                                        main_dep_name=main_dep_name,
+                                        main_dep_path=main_dep_path
+                                    )
+                                    vulnerabilities.append(vulnerability)
+                                else:
+                                    # Handle string via items (legacy format)
+                                    vuln_id = str(via_item)
+                                    url = f"https://github.com/advisories?query={vuln_id}"
+                                    
+                                    vulnerability = vulnerability_class(
+                                        id=vuln_id,
+                                        url=url,
+                                        dependency=vuln_name,
+                                        version=str(range_info),
+                                        source="npm",
+                                        severity=severity,
+                                        via=[str(via_item)],
+                                        fix_available=bool(fix_available),
+                                        main_dep_name=main_dep_name,
+                                        main_dep_path=main_dep_path
+                                    )
+                                    vulnerabilities.append(vulnerability)
+                        else:
+                            # No via information, create basic vulnerability
+                            vuln_id = f"npm-{vuln_name}"
+                            url = f"https://github.com/advisories?query={vuln_name}"
+                            
+                            vulnerability = vulnerability_class(
+                                id=vuln_id,
+                                url=url,
+                                dependency=vuln_name,
+                                version=str(range_info),
+                                source="npm",
+                                severity=severity,
+                                via=[],
+                                fix_available=bool(fix_available),
+                                main_dep_name=main_dep_name,
+                                main_dep_path=main_dep_path
+                            )
+                            vulnerabilities.append(vulnerability)
                         
                     except Exception as e:
                         logger.error(f"Error parsing vulnerability {vuln_name}: {e}")
