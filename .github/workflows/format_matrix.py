@@ -23,9 +23,10 @@ def generate_labels_for_vulnerability(vuln: Dict[str, Any], nsolid_stream: str) 
     if vuln.get("source") == "npm":
         labels.append("NPM")
     
-    # Add Main Dependency label if main_dep_name is present
-    if vuln.get("main_dep_name") and vuln.get("main_dep_name") != "null":
-        labels.append("Main Dependency")
+    # Add main dependency name as label if present
+    main_dep_name = vuln.get("main_dep_name")
+    if main_dep_name and main_dep_name != "null":
+        labels.append(main_dep_name)
     
     # Add severity label if available
     severity = vuln.get("severity")
