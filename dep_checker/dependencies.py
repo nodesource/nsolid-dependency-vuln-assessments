@@ -35,6 +35,7 @@ ignore_list: list[str] = [
     "CVE-2018-25032",  # zlib, already fixed in the fork Node uses (Chromium's)
     "CVE-2007-5536",  # openssl, old and only in combination with HP-UX
     "CVE-2019-0190",  # openssl, can be only triggered in combination with Apache HTTP Server version 2.4.37
+    "CVE-2023-45853",  # https://github.com/nodesource/nsolid-dependency-vuln-assessments/issues/636
 ]
 
 common_dependencies: list[str] = [
