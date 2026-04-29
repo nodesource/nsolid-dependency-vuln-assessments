@@ -24,9 +24,16 @@ from nvdlib import searchCVE  # type: ignore
 from packaging.specifiers import SpecifierSet
 from typing import Optional, List
 from pathlib import Path
+from requests.exceptions import RequestException
 
 import json
 import logging
+import traceback
+
+
+EXIT_SUCCESS = 0
+EXIT_VULNERABILITIES_FOUND = 1
+EXIT_SCAN_ERROR = 2
 
 
 class Vulnerability:
@@ -332,51 +339,58 @@ def main() -> int:
             "Warning: NVD API key not provided, queries will be slower due to rate limiting"
         )
 
-    dependencies = resolve_dependencies(repo_path, repo_branch)
-    ghad_vulnerabilities: list[Vulnerability] = (
-        list() if gh_token is None else query_ghad(dependencies, gh_token, repo_path)
-    )
-    nvd_vulnerabilities: list[Vulnerability] = query_nvd(
-        dependencies, nvd_key, repo_path
-    )
+    try:
+        dependencies = resolve_dependencies(repo_path, repo_branch)
+        ghad_vulnerabilities: list[Vulnerability] = (
+            list() if gh_token is None else query_ghad(dependencies, gh_token, repo_path)
+        )
+        nvd_vulnerabilities: list[Vulnerability] = query_nvd(
+            dependencies, nvd_key, repo_path
+        )
 
-    # NPM package vulnerability checking
-    npm_vulnerabilities: list[Vulnerability] = []
-    if include_npm:
-        try:
-            # Configure logging for npm audit
-            logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            
-            from npm_audit import NPMAuditChecker
-            print("Running npm package vulnerability audit...")
-            npm_checker = NPMAuditChecker(repo_path, npm_timeout)
-            npm_vulnerabilities = npm_checker.check_npm_vulnerabilities(Vulnerability)
-            print(f"Found {len(npm_vulnerabilities)} npm package vulnerabilities")
-        except ImportError as e:
-            print(f"Warning: npm_audit module not found, skipping npm vulnerability checking: {e}")
-        except Exception as e:
-            print(f"Warning: npm vulnerability checking failed: {e}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
+        # NPM package vulnerability checking
+        npm_vulnerabilities: list[Vulnerability] = []
+        if include_npm:
+            try:
+                # Configure logging for npm audit
+                logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                
+                from npm_audit import NPMAuditChecker
+                print("Running npm package vulnerability audit...")
+                npm_checker = NPMAuditChecker(repo_path, npm_timeout)
+                npm_vulnerabilities = npm_checker.check_npm_vulnerabilities(Vulnerability)
+                print(f"Found {len(npm_vulnerabilities)} npm package vulnerabilities")
+            except ImportError as e:
+                print(f"Warning: npm_audit module not found, skipping npm vulnerability checking: {e}")
+            except Exception as e:
+                print(f"Warning: npm vulnerability checking failed: {e}")
+                print(f"Traceback: {traceback.format_exc()}")
 
-    all_vulnerabilities = {
-        "vulnerabilities": ghad_vulnerabilities + nvd_vulnerabilities + npm_vulnerabilities
-    }
-    no_vulnerabilities_found = not ghad_vulnerabilities and not nvd_vulnerabilities and not npm_vulnerabilities
-    if json_output:
-        print(json.dumps(all_vulnerabilities, cls=VulnerabilityEncoder))
-        return 0 if no_vulnerabilities_found else 1
-    elif no_vulnerabilities_found:
-        print(f"No new vulnerabilities found ({len(ignore_list)} ignored)")
-        return 0
-    else:
-        print("WARNING: New vulnerabilities found")
-        for vuln in all_vulnerabilities["vulnerabilities"]:
-            print(
-                f"- {vuln.dependency} (version {vuln.version}) : {vuln.id} ({vuln.url})"
-            )
-        print(f"\n{vulnerability_found_message}")
-        return 1
+        all_vulnerabilities = {
+            "vulnerabilities": ghad_vulnerabilities + nvd_vulnerabilities + npm_vulnerabilities
+        }
+        no_vulnerabilities_found = not ghad_vulnerabilities and not nvd_vulnerabilities and not npm_vulnerabilities
+        if json_output:
+            print(json.dumps(all_vulnerabilities, cls=VulnerabilityEncoder))
+            return EXIT_SUCCESS if no_vulnerabilities_found else EXIT_VULNERABILITIES_FOUND
+        elif no_vulnerabilities_found:
+            print(f"No new vulnerabilities found ({len(ignore_list)} ignored)")
+            return EXIT_SUCCESS
+        else:
+            print("WARNING: New vulnerabilities found")
+            for vuln in all_vulnerabilities["vulnerabilities"]:
+                print(
+                    f"- {vuln.dependency} (version {vuln.version}) : {vuln.id} ({vuln.url})"
+                )
+            print(f"\n{vulnerability_found_message}")
+            return EXIT_VULNERABILITIES_FOUND
+    except RequestException as exc:
+        print(f"Error: vulnerability database request failed: {exc}")
+        return EXIT_SCAN_ERROR
+    except Exception as exc:
+        print(f"Error: vulnerability scan failed: {exc}")
+        print(traceback.format_exc())
+        return EXIT_SCAN_ERROR
 
 
 if __name__ == "__main__":
