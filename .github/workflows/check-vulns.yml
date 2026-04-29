@@ -6,6 +6,7 @@ on:
       nsolidStream:
         type: string
         default: 'main'
+        description: 'N|Solid branch or ref to scan'
     secrets:
       NVD_API_KEY:
         required: true
@@ -14,6 +15,7 @@ on:
       nsolidStream:
         type: string
         default: 'main'
+        description: 'N|Solid branch or ref to scan'
 
 
 permissions:
