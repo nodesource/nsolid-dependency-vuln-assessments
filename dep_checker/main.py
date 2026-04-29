@@ -101,6 +101,53 @@ github_vulnerabilities_query = gql(
 )
 
 
+def resolve_dependencies(
+    repo_path: Path, repo_branch: str
+) -> dict[str, Dependency]:
+    """Return the dependencies that can be parsed from the checked-out repo.
+
+    Known branches still use their curated dependency list. Unknown branches fall
+    back to probing every tracked dependency definition and keeping only the ones
+    whose version parser succeeds against the checkout.
+    """
+
+    configured_names = dependencies_per_branch.get(repo_branch)
+    if configured_names is None:
+        candidate_dependencies = dependencies_info
+        print(
+            f"Info: '{repo_branch}' is not explicitly configured; scanning all known dependency definitions"
+        )
+    else:
+        candidate_dependencies = {
+            name: dep
+            for name, dep in dependencies_info.items()
+            if name in configured_names
+        }
+
+    available_dependencies: dict[str, Dependency] = {}
+    skipped_dependencies: list[str] = []
+
+    for name, dep in candidate_dependencies.items():
+        try:
+            dep.version_parser(repo_path)
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            skipped_dependencies.append(f"{name}: {exc}")
+            continue
+        available_dependencies[name] = dep
+
+    if not available_dependencies:
+        raise RuntimeError(
+            f"No supported dependencies could be resolved from '{repo_branch}'"
+        )
+
+    if skipped_dependencies:
+        print(
+            f"Info: Skipping {len(skipped_dependencies)} dependencies that are not present or not parseable in '{repo_branch}'"
+        )
+
+    return available_dependencies
+
+
 def query_ghad(
     dependencies: dict[str, Dependency], gh_token: str, repo_path: Path
 ) -> list[Vulnerability]:
@@ -235,7 +282,10 @@ def main() -> int:
     parser.add_argument(
         "node_repo_branch",
         metavar="NODE_REPO_BRANCH",
-        help=f"the current branch of the Node repository (supports {supported_branches})",
+        help=(
+            "the current branch of the Node/N|Solid repository; known branches use "
+            f"curated dependency lists, other branches are scanned by probing available dependencies ({supported_branches})"
+        ),
     )
     parser.add_argument(
         "--gh-token",
@@ -273,10 +323,6 @@ def main() -> int:
         raise RuntimeError(
             "Invalid argument: '{repo_path}' is not a valid Node git repository"
         )
-    if repo_branch not in dependencies_per_branch:
-        raise RuntimeError(
-            f"Invalid argument: '{repo_branch}' is not a supported branch. Please use one of: {supported_branches}"
-        )
     if gh_token is None:
         print(
             "Warning: GitHub authentication token not provided, skipping GitHub Advisory Database queries"
@@ -286,11 +332,7 @@ def main() -> int:
             "Warning: NVD API key not provided, queries will be slower due to rate limiting"
         )
 
-    dependencies = {
-        name: dep
-        for name, dep in dependencies_info.items()
-        if name in dependencies_per_branch[repo_branch]
-    }
+    dependencies = resolve_dependencies(repo_path, repo_branch)
     ghad_vulnerabilities: list[Vulnerability] = (
         list() if gh_token is None else query_ghad(dependencies, gh_token, repo_path)
     )
