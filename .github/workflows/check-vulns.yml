@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set_matrix.outputs.matrix }}
+      scan_status: ${{ steps.scan.outputs.status }}
     steps:
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -64,16 +65,20 @@ jobs:
           path: nsolid
           ref: ${{ inputs.nsolidStream }}
       - name: Run the check
+        id: scan
         working-directory: ./dep_checker
         run: |
-          (
-            set -o pipefail
-            python3 main.py --json-output --include-npm --npm-timeout 600 --gh-token ${{ secrets.GITHUB_TOKEN }} --nvd-key=${{ secrets.NVD_API_KEY }} ../nsolid ${{ inputs.nsolidStream }} 2>&1 | tee result.log
-          )
+          set +e
+          set -o pipefail
+          python3 main.py --json-output --include-npm --npm-timeout 600 --gh-token ${{ secrets.GITHUB_TOKEN }} --nvd-key=${{ secrets.NVD_API_KEY }} ../nsolid ${{ inputs.nsolidStream }} 2>&1 | tee result.log
+          status=${PIPESTATUS[0]}
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "Scanner exit status: $status"
           cat result.log
+          exit 0
       - name: build matrix
         id: set_matrix
-        if: ${{ failure() }}
+        if: ${{ steps.scan.outputs.status != '0' }}
         working-directory: ./dep_checker
         run: |
           # Extract vulnerabilities JSON from the log
@@ -87,7 +92,7 @@ jobs:
 
   create-issues:
     needs: check-vulns
-    if: ${{ always() }}
+    if: ${{ needs.check-vulns.outputs.scan_status != '0' }}
     runs-on: ubuntu-latest
     strategy:
       matrix: ${{ fromJson(needs.check-vulns.outputs.matrix) }}

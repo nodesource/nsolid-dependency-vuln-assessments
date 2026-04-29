@@ -12,6 +12,10 @@ import re
 from typing import List, Dict, Any
 
 
+RUNTIME_VERSION_RE = re.compile(r"node-(v[0-9]+(?:\.[0-9]+)?(?:\.x)?)")
+NSOLID_VERSION_RE = re.compile(r"nsolid-(v[0-9]+(?:\.[0-9]+)?(?:\.x)?)")
+
+
 def generate_labels_for_vulnerability(vuln: Dict[str, Any], nsolid_stream: str) -> List[str]:
     """Generate GitHub issue labels for a vulnerability based on its properties and nsolid stream"""
     labels = []
@@ -34,14 +38,20 @@ def generate_labels_for_vulnerability(vuln: Dict[str, Any], nsolid_stream: str) 
         severity_upper = severity.upper()
         labels.append(severity_upper)
     
-    # Extract runtime version from stream (e.g., node-v20.x-nsolid-v5.x -> v20.x)
-    runtime_match = re.search(r'node-(v[0-9]+\.x)', nsolid_stream)
+    # Extract runtime version from stream or release ref
+    # Examples:
+    # - node-v20.x-nsolid-v5.x -> v20.x
+    # - node-v24.15.0-nsolid-v6.2.3-release -> v24.15.0
+    runtime_match = RUNTIME_VERSION_RE.search(nsolid_stream)
     if runtime_match:
         runtime_version = runtime_match.group(1)
         labels.append(runtime_version)
     
-    # Extract nsolid version from stream (e.g., node-v20.x-nsolid-v5.x -> v5.x)
-    nsolid_match = re.search(r'nsolid-(v[0-9]+\.x)', nsolid_stream)
+    # Extract nsolid version from stream or release ref
+    # Examples:
+    # - node-v20.x-nsolid-v5.x -> v5.x
+    # - node-v24.15.0-nsolid-v6.2.3-release -> v6.2.3
+    nsolid_match = NSOLID_VERSION_RE.search(nsolid_stream)
     if nsolid_match:
         nsolid_version = nsolid_match.group(1)
         labels.append(f"nsolid-{nsolid_version}")
