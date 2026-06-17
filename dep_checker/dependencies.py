@@ -43,7 +43,6 @@ common_dependencies: list[str] = [
     "acorn",
     "brotli",
     "c-ares",
-    "CJS Module Lexer",
     "corepack",
     "HdrHistogram",
     "ICU",
@@ -65,8 +64,8 @@ common_dependencies: list[str] = [
 ]
 
 # Define branch-specific dependencies
-main_specific = ["simdutf"]
-v22_specific = ["simdutf"]
+main_specific = ["simdutf", "CJS Module Lexer",]
+v22_specific = ["simdutf", "CJS Module Lexer"]
 
 # Combine common dependencies with branch-specific ones
 dependencies_per_branch: dict[str, list[str]] = {

@@ -27,6 +27,7 @@ from pathlib import Path
 
 import json
 import logging
+import sys
 
 
 class Vulnerability:
@@ -251,6 +252,11 @@ def main() -> int:
         help="output results in JSON format",
     )
     parser.add_argument(
+        "--scan-file",
+        help="write the JSON scan results to this file (implies JSON output to the file). "
+        "Diagnostic messages are kept on stderr so the file/stdout stays pure JSON.",
+    )
+    parser.add_argument(
         "--include-npm",
         action="store_true",
         help="include npm package vulnerability scanning using npm audit",
@@ -267,6 +273,7 @@ def main() -> int:
     gh_token = args.gh_token
     nvd_key = args.nvd_key
     json_output: bool = args.json_output
+    scan_file: Optional[str] = args.scan_file
     include_npm: bool = args.include_npm
     npm_timeout: int = args.npm_timeout
     if not repo_path.exists() or not (repo_path / ".git").exists():
@@ -279,11 +286,13 @@ def main() -> int:
         )
     if gh_token is None:
         print(
-            "Warning: GitHub authentication token not provided, skipping GitHub Advisory Database queries"
+            "Warning: GitHub authentication token not provided, skipping GitHub Advisory Database queries",
+            file=sys.stderr,
         )
     if nvd_key is None:
         print(
-            "Warning: NVD API key not provided, queries will be slower due to rate limiting"
+            "Warning: NVD API key not provided, queries will be slower due to rate limiting",
+            file=sys.stderr,
         )
 
     dependencies = {
@@ -291,36 +300,61 @@ def main() -> int:
         for name, dep in dependencies_info.items()
         if name in dependencies_per_branch[repo_branch]
     }
-    ghad_vulnerabilities: list[Vulnerability] = (
-        list() if gh_token is None else query_ghad(dependencies, gh_token, repo_path)
-    )
-    nvd_vulnerabilities: list[Vulnerability] = query_nvd(
-        dependencies, nvd_key, repo_path
-    )
+
+    # Track whether every vulnerability source completed successfully. A partial scan must not
+    # cause the reconciler to close issues for vulns that simply weren't queried this run.
+    scan_complete = True
+
+    ghad_vulnerabilities: list[Vulnerability] = []
+    if gh_token is not None:
+        try:
+            ghad_vulnerabilities = query_ghad(dependencies, gh_token, repo_path)
+        except Exception as e:
+            scan_complete = False
+            print(f"Warning: GitHub Advisory Database query failed: {e}", file=sys.stderr)
+
+    nvd_vulnerabilities: list[Vulnerability] = []
+    try:
+        nvd_vulnerabilities = query_nvd(dependencies, nvd_key, repo_path)
+    except Exception as e:
+        scan_complete = False
+        print(f"Warning: NVD query failed: {e}", file=sys.stderr)
 
     # NPM package vulnerability checking
     npm_vulnerabilities: list[Vulnerability] = []
     if include_npm:
         try:
-            # Configure logging for npm audit
-            logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            
+            # Configure logging for npm audit (logging goes to stderr by default)
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                stream=sys.stderr,
+            )
+
             from npm_audit import NPMAuditChecker
-            print("Running npm package vulnerability audit...")
+            print("Running npm package vulnerability audit...", file=sys.stderr)
             npm_checker = NPMAuditChecker(repo_path, npm_timeout)
             npm_vulnerabilities = npm_checker.check_npm_vulnerabilities(Vulnerability)
-            print(f"Found {len(npm_vulnerabilities)} npm package vulnerabilities")
+            print(f"Found {len(npm_vulnerabilities)} npm package vulnerabilities", file=sys.stderr)
         except ImportError as e:
-            print(f"Warning: npm_audit module not found, skipping npm vulnerability checking: {e}")
+            scan_complete = False
+            print(f"Warning: npm_audit module not found, skipping npm vulnerability checking: {e}", file=sys.stderr)
         except Exception as e:
-            print(f"Warning: npm vulnerability checking failed: {e}")
+            scan_complete = False
+            print(f"Warning: npm vulnerability checking failed: {e}", file=sys.stderr)
             import traceback
-            print(f"Traceback: {traceback.format_exc()}")
+            print(f"Traceback: {traceback.format_exc()}", file=sys.stderr)
 
     all_vulnerabilities = {
-        "vulnerabilities": ghad_vulnerabilities + nvd_vulnerabilities + npm_vulnerabilities
+        "vulnerabilities": ghad_vulnerabilities + nvd_vulnerabilities + npm_vulnerabilities,
+        "scan_complete": scan_complete,
     }
     no_vulnerabilities_found = not ghad_vulnerabilities and not nvd_vulnerabilities and not npm_vulnerabilities
+
+    if scan_file is not None:
+        with open(scan_file, "w") as f:
+            json.dump(all_vulnerabilities, f, cls=VulnerabilityEncoder)
+
     if json_output:
         print(json.dumps(all_vulnerabilities, cls=VulnerabilityEncoder))
         return 0 if no_vulnerabilities_found else 1
