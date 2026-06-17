@@ -61,10 +61,16 @@ jobs:
         working-directory: ./dep_checker
         # Write clean JSON to result.json (diagnostics go to stderr). A non-zero exit
         # just means "vulnerabilities were found" — it must not skip reconciliation.
+        # nsolidStream is passed via env (never interpolated into the shell) to avoid
+        # script injection from the workflow_dispatch input.
+        env:
+          NSOLID_STREAM: ${{ inputs.nsolidStream }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
           python3 main.py --scan-file result.json --include-npm --npm-timeout 600 \
-            --gh-token ${{ secrets.GITHUB_TOKEN }} --nvd-key=${{ secrets.NVD_API_KEY }} \
-            ../nsolid ${{ inputs.nsolidStream }} || true
+            --gh-token "$GITHUB_TOKEN" --nvd-key="$NVD_API_KEY" \
+            ../nsolid "$NSOLID_STREAM" || true
           echo "Scan result:"
           cat result.json
       - name: Reconcile issues
@@ -73,8 +79,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          NSOLID_STREAM: ${{ inputs.nsolidStream }}
+          ACTION_URL: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         run: |
           python3 reconcile_issues.py \
-            --stream "${{ inputs.nsolidStream }}" \
+            --stream "$NSOLID_STREAM" \
             --scan-file result.json \
-            --action-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            --action-url "$ACTION_URL"
