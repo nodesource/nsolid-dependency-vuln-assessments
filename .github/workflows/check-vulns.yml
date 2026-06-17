@@ -20,11 +20,15 @@ permissions:
   contents: read
   issues: write
 
+# Serialize reconciliation per stream so two runs for the same stream can never
+# race and double-create issues.
+concurrency:
+  group: reconcile-${{ inputs.nsolidStream }}
+  cancel-in-progress: false
+
 jobs:
   check-vulns:
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set_matrix.outputs.matrix }}
     steps:
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -44,14 +48,6 @@ jobs:
           python3 --version
       - name: Checkout current repository
         uses: actions/checkout@v4
-      - name: Debug directory structure
-        run: |
-          echo "Current directory:"
-          pwd
-          echo "Directory contents:"
-          ls -la
-          echo "dep_checker directory exists:"
-          ls -la dep_checker/ || echo "dep_checker directory not found"
       - name: Installing pre-reqs
         working-directory: ./dep_checker
         run: pip install -r requirements.txt
@@ -63,58 +59,22 @@ jobs:
           ref: ${{ inputs.nsolidStream }}
       - name: Run the check
         working-directory: ./dep_checker
+        # Write clean JSON to result.json (diagnostics go to stderr). A non-zero exit
+        # just means "vulnerabilities were found" — it must not skip reconciliation.
         run: |
-          (
-            set -o pipefail
-            python3 main.py --json-output --include-npm --npm-timeout 600 --gh-token ${{ secrets.GITHUB_TOKEN }} --nvd-key=${{ secrets.NVD_API_KEY }} ../nsolid ${{ inputs.nsolidStream }} 2>&1 | tee result.log
-          )
-          cat result.log
-      - name: build matrix
-        id: set_matrix
-        if: ${{ failure() }}
+          python3 main.py --scan-file result.json --include-npm --npm-timeout 600 \
+            --gh-token ${{ secrets.GITHUB_TOKEN }} --nvd-key=${{ secrets.NVD_API_KEY }} \
+            ../nsolid ${{ inputs.nsolidStream }} || true
+          echo "Scan result:"
+          cat result.json
+      - name: Reconcile issues
+        if: ${{ always() }}
         working-directory: ./dep_checker
-        run: |
-          # Extract vulnerabilities JSON from the log
-          vulnerabilities_json=$(grep -o '{.*}' result.log | tail -1)
-          echo "Raw vulnerabilities JSON: $vulnerabilities_json"
-          
-          # Use the matrix formatter to build the complete matrix with labels
-          matrix=$(python3 ../.github/workflows/format_matrix.py "$vulnerabilities_json" "${{ inputs.nsolidStream }}")
-          echo "Formatted matrix: $matrix"
-          echo "matrix=$matrix" >> $GITHUB_OUTPUT
-
-  create-issues:
-    needs: check-vulns
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    strategy:
-      matrix: ${{ fromJson(needs.check-vulns.outputs.matrix) }}
-      max-parallel: 1
-    steps:
-      - uses: actions/checkout@v4
-      - name: Debug matrix data
-        run: |
-          echo "Matrix vulnerability data:"
-          echo "ID: ${{ matrix.vulnerabilities.id }}"
-          echo "Dependency: ${{ matrix.vulnerabilities.dependency }}"
-          echo "Source: ${{ matrix.vulnerabilities.source }}"
-          echo "Labels: ${{ join(matrix.vulnerabilities.labels, ', ') }}"
-          echo "ISSUE_LABELS: ${{ join(matrix.vulnerabilities.labels, ',') }}"
-      
-      - name: Create or update GitHub issue
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          VULN_ID: ${{ matrix.vulnerabilities.id }}
-          VULN_URL: ${{ matrix.vulnerabilities.url }}
-          VULN_DEP_NAME: ${{ matrix.vulnerabilities.dependency }}
-          VULN_DEP_VERSION: ${{ matrix.vulnerabilities.version }}
-          VULN_SOURCE: ${{ matrix.vulnerabilities.source }}
-          VULN_TITLE: ${{ matrix.vulnerabilities.title }}
-          VULN_MAIN_DEP_NAME: ${{ matrix.vulnerabilities.main_dep_name }}
-          VULN_MAIN_DEP_PATH: ${{ matrix.vulnerabilities.main_dep_path }}
-          NODEJS_STREAM: ${{ inputs.nsolidStream }}
-          ACTION_URL: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          LABELS: ${{ join(matrix.vulnerabilities.labels, ',') }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          .github/workflows/create_issue.sh
+          python3 reconcile_issues.py \
+            --stream "${{ inputs.nsolidStream }}" \
+            --scan-file result.json \
+            --action-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
