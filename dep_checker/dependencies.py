@@ -72,6 +72,7 @@ v22_specific = ["simdutf"]
 dependencies_per_branch: dict[str, list[str]] = {
     "node-v20.x-nsolid-v5.x": common_dependencies,
     "node-v22.x-nsolid-v5.x": common_dependencies + v22_specific,
+    "node-v24.x-nsolid-v6.x": common_dependencies,
 }
 
 
