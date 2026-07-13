@@ -217,7 +217,12 @@ class Gh:
         return issues
 
     def list_closed_issues(self, stream: str, limit: int = 1000) -> List[Dict[str, Any]]:
-        """Closed issues for the stream, used to detect won't-fix suppressions."""
+        """Closed issues for the stream, used to detect won't-fix suppressions.
+
+        Fails closed: if the result hits ``limit`` it is likely truncated, which
+        would make the suppression set incomplete and allow a won't-fix vuln to be
+        re-opened. Abort rather than proceed with partial data.
+        """
         out = self._run([
             "issue", "list",
             "--state", "closed",
@@ -227,7 +232,11 @@ class Gh:
         ])
         issues = json.loads(out) if out.strip() else []
         if len(issues) >= limit:
-            eprint(f"WARNING: closed-issue list hit the limit of {limit}; results may be truncated")
+            raise RuntimeError(
+                f"closed-issue list for stream '{stream}' hit the limit of {limit}; "
+                f"results may be truncated — refusing to reconcile with an incomplete "
+                f"won't-fix suppression set"
+            )
         return issues
 
     def create_issue(self, title: str, body: str) -> Optional[int]:
