@@ -14,7 +14,9 @@ Issues are matched on a stable machine-readable key embedded in the issue body
 listed by the per-stream LABEL, which is index-independent and immediately consistent, so
 near-simultaneous runs cannot create duplicates.
 
-Closed issues are never touched: a reappearing vulnerability always gets a fresh issue.
+Closed issues are never re-opened. A vulnerability whose key matches a closed
+issue carrying a "won't fix" label (any case, ``_`` or space) is suppressed and
+not re-created. Other reappearing vulnerabilities get a fresh issue.
 """
 
 from __future__ import annotations
@@ -35,6 +37,15 @@ CLOSE_MARKER = "<!-- vuln-bot-close -->"
 
 # Severity labels are mutually exclusive, so they are reset (not just added) on update.
 SEVERITY_LABELS = {"CRITICAL", "HIGH", "MODERATE", "MEDIUM", "LOW"}
+
+# Labels marking a closed issue as "won't fix"; matched case-insensitively, with
+# ``_`` and space treated as equivalent. A vuln whose key matches a closed issue
+# carrying any of these labels is not re-opened on subsequent scans.
+WONT_FIX_LABEL = "WONT FIX"  # normalized form (uppercase, underscore -> space)
+
+
+def _is_wont_fix_label(label_name: str) -> bool:
+    return label_name.upper().replace("_", " ").strip() == WONT_FIX_LABEL
 
 
 def eprint(*args: Any) -> None:
@@ -205,6 +216,20 @@ class Gh:
             eprint(f"WARNING: open-issue list hit the limit of {limit}; results may be truncated")
         return issues
 
+    def list_closed_issues(self, stream: str, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Closed issues for the stream, used to detect won't-fix suppressions."""
+        out = self._run([
+            "issue", "list",
+            "--state", "closed",
+            "--label", stream,
+            "--limit", str(limit),
+            "--json", "number,title,body,labels",
+        ])
+        issues = json.loads(out) if out.strip() else []
+        if len(issues) >= limit:
+            eprint(f"WARNING: closed-issue list hit the limit of {limit}; results may be truncated")
+        return issues
+
     def create_issue(self, title: str, body: str) -> Optional[int]:
         out = self._run(
             ["issue", "create", "--title", title, "--body-file", "-"],
@@ -288,7 +313,20 @@ def reconcile(scan: Dict[str, Any], stream: str, action_url: str, gh: Gh) -> int
                 recognizable.add(issue["number"])
 
     matched: set = set()
-    created = updated = closed = 0
+    created = updated = closed = skipped = 0
+
+    # Build the set of suppressed keys from closed issues marked won't fix.
+    suppressed: set = set()
+    for issue in gh.list_closed_issues(stream):
+        if not any(_is_wont_fix_label(lbl.get("name", "")) for lbl in issue.get("labels", [])):
+            continue
+        mk = extract_key(issue.get("body"))
+        if mk:
+            suppressed.add(mk)
+            continue
+        lk = legacy_key_from_title(issue.get("title", ""))
+        if lk:
+            suppressed.add(lk)
 
     # Create / update.
     for pkey, vuln in desired.items():
@@ -300,6 +338,9 @@ def reconcile(scan: Dict[str, Any], stream: str, action_url: str, gh: Gh) -> int
             matched.add(issue["number"])
             updated += 1
             eprint(f"Updated #{issue['number']}: {render_title(stream, vuln)}")
+        elif pkey in suppressed or legacy_key_for_vuln(stream, vuln) in suppressed:
+            skipped += 1
+            eprint(f"Skipped (won't fix): {render_title(stream, vuln)}")
         else:
             number = gh.create_issue(render_title(stream, vuln), body)
             if number is not None:
@@ -324,7 +365,7 @@ def reconcile(scan: Dict[str, Any], stream: str, action_url: str, gh: Gh) -> int
     else:
         eprint("Scan incomplete (scan_complete=false): skipping close phase to avoid false closes")
 
-    eprint(f"Reconcile summary for {stream}: created={created} updated={updated} closed={closed}")
+    eprint(f"Reconcile summary for {stream}: created={created} updated={updated} closed={closed} skipped={skipped}")
     return 0
 
 
