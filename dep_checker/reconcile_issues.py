@@ -216,27 +216,29 @@ class Gh:
             eprint(f"WARNING: open-issue list hit the limit of {limit}; results may be truncated")
         return issues
 
-    def list_closed_issues(self, stream: str, limit: int = 1000) -> List[Dict[str, Any]]:
-        """Closed issues for the stream, used to detect won't-fix suppressions.
+    def list_closed_issues(self, stream: str) -> List[Dict[str, Any]]:
+        """Closed issues for the stream, fully paginated via ``gh api --paginate``.
 
-        Fails closed: if the result hits ``limit`` it is likely truncated, which
-        would make the suppression set incomplete and allow a won't-fix vuln to be
-        re-opened. Abort rather than proceed with partial data.
+        Uses the REST issues endpoint with ``--paginate`` so every matching closed
+        issue is retrieved regardless of count — necessary because the won't-fix
+        suppression set must be complete to avoid re-opening a suppressed vuln.
+        Pull requests are filtered out.
         """
         out = self._run([
-            "issue", "list",
-            "--state", "closed",
-            "--label", stream,
-            "--limit", str(limit),
-            "--json", "number,title,body,labels",
+            "api",
+            "--paginate",
+            "--method", "GET",
+            "repos/{owner}/{repo}/issues",
+            "-f", "state=closed",
+            "-f", f"labels={stream}",
+            "-f", "per_page=100",
+            "--jq", '.[] | select(.pull_request == null) | {number, title, body, labels: [.labels[] | {name: .name}]}',
         ])
-        issues = json.loads(out) if out.strip() else []
-        if len(issues) >= limit:
-            raise RuntimeError(
-                f"closed-issue list for stream '{stream}' hit the limit of {limit}; "
-                f"results may be truncated — refusing to reconcile with an incomplete "
-                f"won't-fix suppression set"
-            )
+        issues: List[Dict[str, Any]] = []
+        for line in out.splitlines():
+            line = line.strip()
+            if line:
+                issues.append(json.loads(line))
         return issues
 
     def create_issue(self, title: str, body: str) -> Optional[int]:
