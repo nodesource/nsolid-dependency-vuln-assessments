@@ -45,6 +45,9 @@ class NPMAuditChecker:
         self.repo_path = repo_path
         self.timeout = timeout
         self.exclude_paths = EXCLUDE_PATHS  # Use the static exclusion list
+        # A failed package-level audit means the aggregate npm result is partial.
+        # The caller uses this to prevent reconciliation from closing valid issues.
+        self.failed_packages: List[str] = []
         
     def find_package_json_files(self) -> List[Path]:
         """Find all package.json files in the deps/ folder only, excluding specified folders"""
@@ -91,7 +94,7 @@ class NPMAuditChecker:
             return []
     
     def run_npm_install(self, package_dir: Path) -> bool:
-        """Run npm install --production in the given directory"""
+        """Install production dependencies needed for an audit without lifecycle scripts."""
         try:
             logger.info(f"Running npm install in {package_dir}")
             # Check if npm is available
@@ -106,16 +109,24 @@ class NPMAuditChecker:
                 logger.error(f"npm is not available: {npm_check.stderr}")
                 return False
             
+            # Source trees can have prepare hooks that require dev-only tooling
+            # (for example Husky or tshy). Lifecycle scripts are not needed to
+            # construct npm's dependency tree for an audit.
             result = subprocess.run(
-                ["npm", "install", "--production", "--no-audit", "--no-fund", "--silent"],
+                [
+                    "npm", "install", "--production", "--ignore-scripts",
+                    "--no-audit", "--no-fund", "--silent",
+                ],
                 cwd=package_dir,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout
+                timeout=self.timeout,
             )
             
             if result.returncode != 0:
-                logger.warning(f"npm install failed in {package_dir}: {result.stderr}")
+                logger.warning(
+                    f"npm install failed in {package_dir} (exit {result.returncode}): {result.stderr}"
+                )
                 logger.warning(f"npm install stdout: {result.stdout}")
                 return False
             
@@ -152,7 +163,10 @@ class NPMAuditChecker:
                     logger.error(f"Failed to parse npm audit JSON output in {package_dir}: {e}")
                     return None
             else:
-                logger.warning(f"npm audit returned no output in {package_dir}")
+                logger.warning(
+                    f"npm audit returned no output in {package_dir} (exit {result.returncode}): "
+                    f"{result.stderr}"
+                )
                 return None
                 
         except subprocess.TimeoutExpired:
@@ -303,12 +317,14 @@ class NPMAuditChecker:
                 # Run npm install
                 if not self.run_npm_install(package_dir):
                     logger.warning(f"Skipping npm audit for {package_dir} due to install failure")
+                    self.failed_packages.append(f"{package_dir}: npm install failed")
                     continue
                 
                 # Run npm audit
                 audit_data = self.run_npm_audit(package_dir)
                 if audit_data is None:
                     logger.warning(f"Skipping vulnerability parsing for {package_dir} due to audit failure")
+                    self.failed_packages.append(f"{package_dir}: npm audit failed")
                     continue
                 
                 # Parse vulnerabilities
@@ -316,7 +332,8 @@ class NPMAuditChecker:
                 all_vulnerabilities.extend(vulnerabilities)
                 
             except Exception as e:
-                logger.error(f"Error processing {package_json}: {e}")
+                logger.exception(f"Error processing {package_json}: {e}")
+                self.failed_packages.append(f"{package_dir}: unexpected error: {e}")
                 continue
         
         logger.info(f"Total npm vulnerabilities found: {len(all_vulnerabilities)}")

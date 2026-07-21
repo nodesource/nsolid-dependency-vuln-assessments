@@ -28,6 +28,7 @@ from pathlib import Path
 import json
 import logging
 import sys
+import traceback
 
 
 class Vulnerability:
@@ -312,6 +313,7 @@ def main() -> int:
         except Exception as e:
             scan_complete = False
             print(f"Warning: GitHub Advisory Database query failed: {e}", file=sys.stderr)
+            print(traceback.format_exc(), file=sys.stderr)
 
     nvd_vulnerabilities: list[Vulnerability] = []
     try:
@@ -319,6 +321,7 @@ def main() -> int:
     except Exception as e:
         scan_complete = False
         print(f"Warning: NVD query failed: {e}", file=sys.stderr)
+        print(traceback.format_exc(), file=sys.stderr)
 
     # NPM package vulnerability checking
     npm_vulnerabilities: list[Vulnerability] = []
@@ -335,6 +338,14 @@ def main() -> int:
             print("Running npm package vulnerability audit...", file=sys.stderr)
             npm_checker = NPMAuditChecker(repo_path, npm_timeout)
             npm_vulnerabilities = npm_checker.check_npm_vulnerabilities(Vulnerability)
+            if npm_checker.failed_packages:
+                scan_complete = False
+                print(
+                    f"Warning: npm audit was incomplete; {len(npm_checker.failed_packages)} package(s) failed:",
+                    file=sys.stderr,
+                )
+                for failure in npm_checker.failed_packages:
+                    print(f"  - {failure}", file=sys.stderr)
             print(f"Found {len(npm_vulnerabilities)} npm package vulnerabilities", file=sys.stderr)
         except ImportError as e:
             scan_complete = False
@@ -342,7 +353,6 @@ def main() -> int:
         except Exception as e:
             scan_complete = False
             print(f"Warning: npm vulnerability checking failed: {e}", file=sys.stderr)
-            import traceback
             print(f"Traceback: {traceback.format_exc()}", file=sys.stderr)
 
     all_vulnerabilities = {
