@@ -15,6 +15,11 @@ from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+
+class AuditParseError(Exception):
+    """Raised when npm audit returns output that cannot be parsed reliably."""
+
+
 # Folder paths to exclude from npm package scanning
 # Add folder paths here that should be skipped during package.json discovery
 # Paths should be relative to the repository root (e.g., "deps/v8/tools/turbolizer")
@@ -161,7 +166,7 @@ class NPMAuditChecker:
                     return audit_data
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse npm audit JSON output in {package_dir}: {e}")
-                    return None
+                    raise AuditParseError("npm audit returned malformed JSON") from e
             else:
                 logger.warning(
                     f"npm audit returned no output in {package_dir} (exit {result.returncode}): "
@@ -172,6 +177,8 @@ class NPMAuditChecker:
         except subprocess.TimeoutExpired:
             logger.error(f"npm audit timed out in {package_dir}")
             return None
+        except AuditParseError:
+            raise
         except Exception as e:
             logger.error(f"Error running npm audit in {package_dir}: {e}")
             return None
@@ -361,6 +368,10 @@ class NPMAuditChecker:
                     continue
                 all_vulnerabilities.extend(vulnerabilities)
                 
+            except AuditParseError as e:
+                logger.warning(f"Skipping vulnerability parsing for {package_dir}: {e}")
+                self.failed_packages.append(f"{package_dir}: npm audit parse failed")
+                continue
             except Exception as e:
                 logger.exception(f"Error processing {package_json}: {e}")
                 self.failed_packages.append(f"{package_dir}: unexpected error: {e}")
