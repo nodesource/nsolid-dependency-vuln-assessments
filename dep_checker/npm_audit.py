@@ -176,8 +176,10 @@ class NPMAuditChecker:
             logger.error(f"Error running npm audit in {package_dir}: {e}")
             return None
     
-    def parse_audit_results(self, audit_data: Dict, package_dir: Path, vulnerability_class) -> List:
-        """Parse npm audit JSON output into Vulnerability objects"""
+    def parse_audit_results(
+        self, audit_data: Dict, package_dir: Path, vulnerability_class
+    ) -> Optional[List]:
+        """Parse npm audit JSON output, returning None when it is incomplete or invalid."""
         vulnerabilities = []
         
         # Extract main dependency information from package_dir path
@@ -185,10 +187,20 @@ class NPMAuditChecker:
         main_dep_path = str(package_dir.relative_to(self.repo_path))  # Relative path from repo root
         
         try:
+            if not isinstance(audit_data, dict):
+                raise ValueError("npm audit JSON root is not an object")
+
             # npm audit v7+ format
             if "vulnerabilities" in audit_data:
-                for vuln_name, vuln_data in audit_data["vulnerabilities"].items():
+                audit_vulnerabilities = audit_data["vulnerabilities"]
+                if not isinstance(audit_vulnerabilities, dict):
+                    raise ValueError("npm audit vulnerabilities field is not an object")
+
+                for vuln_name, vuln_data in audit_vulnerabilities.items():
                     try:
+                        if not isinstance(vuln_data, dict):
+                            raise ValueError("vulnerability entry is not an object")
+
                         # Extract vulnerability information
                         severity = vuln_data.get("severity", "unknown")
                         via = vuln_data.get("via", [])
@@ -196,7 +208,10 @@ class NPMAuditChecker:
                         range_info = vuln_data.get("range", "unknown")
                         
                         # Handle different via formats - create separate vulnerabilities for each advisory
-                        if isinstance(via, list) and via:
+                        if not isinstance(via, list):
+                            raise ValueError("vulnerability via field is not a list")
+
+                        if via:
                             for via_item in via:
                                 if isinstance(via_item, dict):
                                     # Extract individual advisory information
@@ -231,7 +246,7 @@ class NPMAuditChecker:
                                         main_dep_path=main_dep_path
                                     )
                                     vulnerabilities.append(vulnerability)
-                                else:
+                                elif isinstance(via_item, str):
                                     # Handle string via items (legacy format)
                                     vuln_id = str(via_item)
                                     url = f"https://github.com/advisories?query={vuln_id}"
@@ -249,6 +264,8 @@ class NPMAuditChecker:
                                         main_dep_path=main_dep_path
                                     )
                                     vulnerabilities.append(vulnerability)
+                                else:
+                                    raise ValueError("vulnerability via item is not an object or string")
                         else:
                             # No via information, create basic vulnerability
                             vuln_id = f"npm-{vuln_name}"
@@ -270,12 +287,19 @@ class NPMAuditChecker:
                         
                     except Exception as e:
                         logger.error(f"Error parsing vulnerability {vuln_name}: {e}")
-                        continue
+                        return None
             
             # Legacy npm audit format (fallback)
             elif "advisories" in audit_data:
-                for advisory_id, advisory in audit_data["advisories"].items():
+                audit_advisories = audit_data["advisories"]
+                if not isinstance(audit_advisories, dict):
+                    raise ValueError("npm audit advisories field is not an object")
+
+                for advisory_id, advisory in audit_advisories.items():
                     try:
+                        if not isinstance(advisory, dict):
+                            raise ValueError("advisory entry is not an object")
+
                         vulnerability = vulnerability_class(
                             id=f"npm-{advisory_id}",
                             url=advisory.get("url", f"https://npmjs.com/advisories/{advisory_id}"),
@@ -291,14 +315,16 @@ class NPMAuditChecker:
                         vulnerabilities.append(vulnerability)
                     except Exception as e:
                         logger.error(f"Error parsing advisory {advisory_id}: {e}")
-                        continue
+                        return None
+            else:
+                raise ValueError("unrecognized npm audit JSON format")
             
             logger.info(f"Parsed {len(vulnerabilities)} vulnerabilities from {package_dir}")
             return vulnerabilities
             
         except Exception as e:
             logger.error(f"Error parsing audit results from {package_dir}: {e}")
-            return []
+            return None
     
     def check_npm_vulnerabilities(self, vulnerability_class) -> List:
         """Main method to check npm vulnerabilities across all package.json files"""
@@ -329,6 +355,10 @@ class NPMAuditChecker:
                 
                 # Parse vulnerabilities
                 vulnerabilities = self.parse_audit_results(audit_data, package_dir, vulnerability_class)
+                if vulnerabilities is None:
+                    logger.warning(f"Skipping vulnerability parsing for {package_dir} due to parse failure")
+                    self.failed_packages.append(f"{package_dir}: npm audit parse failed")
+                    continue
                 all_vulnerabilities.extend(vulnerabilities)
                 
             except Exception as e:
