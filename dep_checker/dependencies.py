@@ -51,7 +51,6 @@ common_dependencies: list[str] = [
     "npm",
     "OpenSSL",
     "libuv",
-    "simdutf",
     "uvwasi",
     "undici",
     "zlib",
@@ -64,12 +63,13 @@ common_dependencies: list[str] = [
 ]
 
 # Define branch-specific dependencies
+v20_specific = ["simdutf"]
 main_specific = ["simdutf", "CJS Module Lexer",]
 v22_specific = ["simdutf", "CJS Module Lexer"]
 
 # Combine common dependencies with branch-specific ones
 dependencies_per_branch: dict[str, list[str]] = {
-    "node-v20.x-nsolid-v5.x": common_dependencies,
+    "node-v20.x-nsolid-v5.x": common_dependencies + v20_specific,
     "node-v22.x-nsolid-v5.x": common_dependencies + v22_specific,
     "node-v22.x-nsolid-v6.x": common_dependencies + v22_specific,
     "node-v24.x-nsolid-v6.x": common_dependencies,
