@@ -83,6 +83,17 @@ def legacy_key_for_vuln(stream: str, vuln: Dict[str, Any]) -> str:
     return legacy_key(stream, vuln.get("source", "binary"), vuln["id"], vuln["dependency"])
 
 
+def alias_keys_for_vuln(stream: str, vuln: Dict[str, Any]) -> List[str]:
+    source = vuln.get("source", "binary")
+    location = vuln.get("main_dep_path", "") if source == "npm" else ""
+    aliases = vuln.get("advisory_aliases") or []
+    return ["|".join(_sanitize(f) for f in [stream, source, alias, vuln["dependency"], location]) for alias in aliases]
+
+
+def legacy_alias_keys_for_vuln(stream: str, vuln: Dict[str, Any]) -> List[str]:
+    return [legacy_key(stream, vuln.get("source", "binary"), alias, vuln["dependency"]) for alias in (vuln.get("advisory_aliases") or [])]
+
+
 def legacy_key_from_title(title: str) -> Optional[str]:
     """Reconstruct a legacy key from an issue title, or None if it doesn't parse."""
     m = re.match(r"^(.*?) \((.*?) via (.*?)\) found on (.+)$", title)
@@ -341,7 +352,19 @@ def reconcile(scan: Dict[str, Any], stream: str, action_url: str, gh: Gh) -> int
 
     # Create / update.
     for pkey, vuln in desired.items():
-        issue = by_pkey.get(pkey) or by_legacy.get(legacy_key_for_vuln(stream, vuln))
+        issue = by_pkey.get(pkey)
+        if issue is None:
+            for alias_key in alias_keys_for_vuln(stream, vuln):
+                issue = by_pkey.get(alias_key)
+                if issue is not None:
+                    break
+        if issue is None:
+            issue = by_legacy.get(legacy_key_for_vuln(stream, vuln))
+        if issue is None:
+            for legacy_alias in legacy_alias_keys_for_vuln(stream, vuln):
+                issue = by_legacy.get(legacy_alias)
+                if issue is not None:
+                    break
         body = render_body(vuln, pkey, action_url)
         if issue:
             gh.edit_body(issue["number"], body)  # backfills the marker for legacy issues
@@ -349,7 +372,12 @@ def reconcile(scan: Dict[str, Any], stream: str, action_url: str, gh: Gh) -> int
             matched.add(issue["number"])
             updated += 1
             eprint(f"Updated #{issue['number']}: {render_title(stream, vuln)}")
-        elif pkey in suppressed or legacy_key_for_vuln(stream, vuln) in suppressed:
+        elif (
+            pkey in suppressed
+            or legacy_key_for_vuln(stream, vuln) in suppressed
+            or any(alias_key in suppressed for alias_key in alias_keys_for_vuln(stream, vuln))
+            or any(alias_key in suppressed for alias_key in legacy_alias_keys_for_vuln(stream, vuln))
+        ):
             skipped += 1
             eprint(f"Skipped (won't fix): {render_title(stream, vuln)}")
         else:

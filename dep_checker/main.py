@@ -35,7 +35,7 @@ class Vulnerability:
     def __init__(self, id: str, url: str, dependency: str, version: str, source: str = "binary", 
                  severity: Optional[str] = None, via: Optional[list] = None, 
                  fix_available: Optional[bool] = None, main_dep_name: Optional[str] = None,
-                 main_dep_path: Optional[str] = None):
+                 main_dep_path: Optional[str] = None, advisory_aliases: Optional[list[str]] = None):
         self.id = id
         self.url = url
         self.dependency = dependency
@@ -46,6 +46,7 @@ class Vulnerability:
         self.fix_available = fix_available  # whether fix is available
         self.main_dep_name = main_dep_name  # main dependency name for npm vulnerabilities
         self.main_dep_path = main_dep_path  # path to the main dependency
+        self.advisory_aliases = advisory_aliases or []  # alternate IDs for reconciliation migration
 
 
 class VulnerabilityEncoder(json.JSONEncoder):
@@ -69,6 +70,8 @@ class VulnerabilityEncoder(json.JSONEncoder):
                 result["main_dep_path"] = obj.main_dep_path
             if obj.fix_available is not None:
                 result["fix_available"] = obj.fix_available
+            if obj.advisory_aliases:
+                result["advisory_aliases"] = obj.advisory_aliases
             return result
         # Let the base class default method raise the TypeError
         return json.JSONEncoder.default(self, obj)
@@ -395,7 +398,7 @@ def main() -> int:
 
             from npm_audit import NPMAuditChecker
             print("Running npm package vulnerability audit...", file=sys.stderr)
-            npm_checker = NPMAuditChecker(repo_path, npm_timeout)
+            npm_checker = NPMAuditChecker(repo_path, npm_timeout, gh_token=gh_token)
             npm_vulnerabilities = npm_checker.check_npm_vulnerabilities(Vulnerability)
             if npm_checker.failed_packages:
                 scan_complete = False
