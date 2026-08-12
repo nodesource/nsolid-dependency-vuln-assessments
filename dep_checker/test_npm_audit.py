@@ -502,12 +502,55 @@ def test_get_installed_bundle_packages_accepts_boolean_bundle_dependencies() -> 
                 }
             },
         )
+        package_map = {pkg["name"]: pkg for pkg in packages}
 
         assert sorted((pkg["name"], pkg["version"]) for pkg in packages) == [
             ("minipass", "7.1.3"),
             ("minipass_dup", "7.1.3"),
             ("tar", "7.5.19"),
         ]
+        assert package_map["tar"]["path"] == "node_modules/tar"
+        assert package_map["minipass"]["path"] == "node_modules/tar/node_modules/minipass"
+
+
+def test_get_installed_bundle_packages_traverses_duplicate_parent_subtrees() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        package_dir = Path(temp_dir) / "deps" / "npm"
+        write_package_json(
+            package_dir / "package.json",
+            {
+                "name": "npm",
+                "version": "11.18.0",
+                "bundleDependencies": ["make-fetch-happen", "wrapper"],
+            },
+        )
+
+        checker = NPMAuditChecker(Path(temp_dir), timeout=60)
+        packages = checker.get_installed_bundle_packages(
+            package_dir,
+            {
+                "dependencies": {
+                    "wrapper": {
+                        "version": "1.0.0",
+                        "dependencies": {
+                            "make-fetch-happen": {
+                                "version": "15.0.6"
+                            }
+                        },
+                    },
+                    "make-fetch-happen": {
+                        "version": "15.0.6",
+                        "dependencies": {
+                            "ip-address": {"version": "10.2.0"}
+                        },
+                    },
+                }
+            },
+        )
+        package_map = {pkg["name"]: pkg for pkg in packages}
+
+        assert package_map["make-fetch-happen"]["path"] == "node_modules/wrapper/node_modules/make-fetch-happen"
+        assert package_map["ip-address"]["path"] == "node_modules/make-fetch-happen/node_modules/ip-address"
 
 
 def test_npm_cli_uses_installed_tree() -> None:
@@ -577,6 +620,7 @@ def test_npm_audit_basic() -> None:
     test_parse_audit_results_normalizes_ids()
     test_preferred_advisory_id()
     test_normalize_version_range()
+    test_get_installed_bundle_packages_traverses_duplicate_parent_subtrees()
     test_get_installed_bundle_packages_accepts_boolean_bundle_dependencies()
     test_npm_cli_uses_installed_tree()
 

@@ -285,21 +285,22 @@ class NPMAuditChecker:
             roots = set(bundle_dependencies or [])
         seen: Dict[tuple[str, str], Dict[str, str]] = {}
 
-        def walk(name: str, node: Dict) -> None:
+        def walk(name: str, node: Dict, path_parts: Optional[list[str]] = None) -> None:
+            path_parts = path_parts or []
             version = node.get("version")
             if not version:
                 return
             key = (name, str(version))
-            if key in seen:
-                return
-            seen[key] = {"name": name, "version": str(version)}
+            package_path_parts = [*path_parts, "node_modules", name]
+            if key not in seen:
+                seen[key] = {"name": name, "version": str(version), "path": "/".join(package_path_parts)}
             for child_name, child in (node.get("dependencies") or {}).items():
                 if isinstance(child, dict):
-                    walk(child_name, child)
+                    walk(child_name, child, package_path_parts)
 
         for name, node in (tree_data.get("dependencies") or {}).items():
             if name in roots and isinstance(node, dict):
-                walk(name, node)
+                walk(name, node, [])
 
         return list(seen.values())
 
