@@ -96,6 +96,10 @@ github_vulnerabilities_query = gql(
           vulnerableVersionRange
           advisory {
             ghsaId
+            identifiers {
+              type
+              value
+            }
             permalink
             withdrawnAt
           }
@@ -104,6 +108,50 @@ github_vulnerabilities_query = gql(
     }
 """
 )
+
+def preferred_advisory_id(advisory: dict) -> str:
+    for identifier in advisory.get("identifiers") or []:
+        if identifier.get("type") == "CVE" and identifier.get("value"):
+            return identifier["value"]
+    return advisory["ghsaId"]
+
+
+def advisory_aliases(advisory: dict, preferred_id: str) -> list[str]:
+    aliases: list[str] = []
+    for identifier in advisory.get("identifiers") or []:
+        value = identifier.get("value")
+        if value and value != preferred_id and value not in aliases:
+            aliases.append(value)
+    return aliases
+
+
+def merge_vulnerabilities(vulnerabilities: list[Vulnerability]) -> list[Vulnerability]:
+    merged: dict[str, Vulnerability] = {}
+    ordered: list[Vulnerability] = []
+
+    def index_vulnerability(vuln: Vulnerability) -> None:
+        aliases = list(dict.fromkeys(alias for alias in (vuln.advisory_aliases or []) if alias != vuln.id))
+        vuln.advisory_aliases = aliases
+        for candidate_id in [vuln.id, *aliases]:
+            merged[candidate_id] = vuln
+
+    for vuln in vulnerabilities:
+        candidate_ids = [vuln.id, *(vuln.advisory_aliases or [])]
+        for candidate_id in candidate_ids:
+            existing = merged.get(candidate_id)
+            if existing is None:
+                continue
+            aliases = list(existing.advisory_aliases or [])
+            for alias in [vuln.id, *(vuln.advisory_aliases or [])]:
+                if alias != existing.id and alias not in aliases:
+                    aliases.append(alias)
+            existing.advisory_aliases = aliases
+            index_vulnerability(existing)
+            break
+        else:
+            index_vulnerability(vuln)
+            ordered.append(vuln)
+    return ordered
 
 
 def resolve_dependencies(
@@ -197,23 +245,28 @@ def query_ghad(
             github_vulnerabilities_query, variable_values=variables_package
         )
         dep_version = dep.version_parser(repo_path)
-        matching_vulns = [
-            v
-            for v in result["securityVulnerabilities"]["nodes"]
-            if v["advisory"]["withdrawnAt"] is None
-            and dep_version in SpecifierSet(v["vulnerableVersionRange"])
-            and v["advisory"]["ghsaId"] not in ignore_list
-        ]
+        matching_vulns = []
+        for vuln in result["securityVulnerabilities"]["nodes"]:
+            if vuln["advisory"]["withdrawnAt"] is not None:
+                continue
+            if dep_version not in SpecifierSet(vuln["vulnerableVersionRange"]):
+                continue
+            preferred_id = preferred_advisory_id(vuln["advisory"])
+            aliases = advisory_aliases(vuln["advisory"], preferred_id)
+            if any(candidate_id in ignore_list for candidate_id in [preferred_id, *aliases]):
+                continue
+            matching_vulns.append((vuln, preferred_id, aliases))
         if matching_vulns:
             found_vulnerabilities.extend(
                 [
                     Vulnerability(
-                        id=vuln["advisory"]["ghsaId"],
+                        id=preferred_id,
                         url=vuln["advisory"]["permalink"],
                         dependency=name,
                         version=dep_version,
+                        advisory_aliases=aliases,
                     )
-                    for vuln in matching_vulns
+                    for vuln, preferred_id, aliases in matching_vulns
                 ]
             )
 
@@ -398,7 +451,7 @@ def main() -> int:
 
             from npm_audit import NPMAuditChecker
             print("Running npm package vulnerability audit...", file=sys.stderr)
-            npm_checker = NPMAuditChecker(repo_path, npm_timeout, gh_token=gh_token)
+            npm_checker = NPMAuditChecker(repo_path, npm_timeout, gh_token=gh_token, nvd_key=nvd_key)
             npm_vulnerabilities = npm_checker.check_npm_vulnerabilities(Vulnerability)
             if npm_checker.failed_packages:
                 scan_complete = False
@@ -417,11 +470,14 @@ def main() -> int:
             print(f"Warning: npm vulnerability checking failed: {e}", file=sys.stderr)
             print(f"Traceback: {traceback.format_exc()}", file=sys.stderr)
 
+    merged_vulnerabilities = merge_vulnerabilities(
+        ghad_vulnerabilities + nvd_vulnerabilities + npm_vulnerabilities
+    )
     all_vulnerabilities = {
-        "vulnerabilities": ghad_vulnerabilities + nvd_vulnerabilities + npm_vulnerabilities,
+        "vulnerabilities": merged_vulnerabilities,
         "scan_complete": scan_complete,
     }
-    no_vulnerabilities_found = not ghad_vulnerabilities and not nvd_vulnerabilities and not npm_vulnerabilities
+    no_vulnerabilities_found = not merged_vulnerabilities
 
     if scan_file is not None:
         with open(scan_file, "w") as f:
