@@ -9,28 +9,32 @@ from pathlib import Path
 
 try:
     import npm_audit
-except ModuleNotFoundError as exc:
-    if exc.name != "gql":
-        raise
-    gql_module = types.ModuleType("gql")
-    gql_module.gql = lambda query: query
+except ModuleNotFoundError:
+    if "gql" not in sys.modules:
+        gql_module = types.ModuleType("gql")
+        gql_module.gql = lambda query: query
 
-    class DummyClient:
-        def __init__(self, *args, **kwargs):
-            pass
+        class DummyClient:
+            def __init__(self, *args, **kwargs):
+                pass
 
-    gql_module.Client = DummyClient
-    transport_module = types.ModuleType("gql.transport.aiohttp")
+        gql_module.Client = DummyClient
+        transport_module = types.ModuleType("gql.transport.aiohttp")
 
-    class DummyTransport:
-        def __init__(self, *args, **kwargs):
-            pass
+        class DummyTransport:
+            def __init__(self, *args, **kwargs):
+                pass
 
-    transport_module.AIOHTTPTransport = DummyTransport
-    sys.modules["gql"] = gql_module
-    sys.modules["gql.transport"] = types.ModuleType("gql.transport")
-    sys.modules["gql.transport.aiohttp"] = transport_module
+        transport_module.AIOHTTPTransport = DummyTransport
+        sys.modules["gql"] = gql_module
+        sys.modules["gql.transport"] = types.ModuleType("gql.transport")
+        sys.modules["gql.transport.aiohttp"] = transport_module
+    if "nvdlib" not in sys.modules:
+        nvdlib_module = types.ModuleType("nvdlib")
+        nvdlib_module.searchCVE = lambda *args, **kwargs: []
+        sys.modules["nvdlib"] = nvdlib_module
     import npm_audit
+
 
 from npm_audit import NPMAuditChecker
 
@@ -312,6 +316,306 @@ def test_enolock_falls_back_to_install_and_normal_audit() -> None:
     assert ["npm", "audit", "--omit=dev", "--json"] in calls
 
 
+def test_nvd_primary_merges_ghad_aliases() -> None:
+    class FakeCve:
+        def __init__(self):
+            self.id = "CVE-2026-54272"
+            self.url = "https://nvd.nist.gov/vuln/detail/CVE-2026-54272"
+            self.metrics = None
+
+    class FakeClient:
+        def execute(self, query, variable_values):
+            return {
+                "securityVulnerabilities": {
+                    "nodes": [
+                        {
+                            "severity": "HIGH",
+                            "vulnerableVersionRange": ">=10.1.1, <=10.2.0",
+                            "firstPatchedVersion": {"identifier": "10.2.1"},
+                            "advisory": {
+                                "ghsaId": "GHSA-ip-addr",
+                                "identifiers": [
+                                    {"type": "GHSA", "value": "GHSA-ip-addr"},
+                                    {"type": "CVE", "value": "CVE-2026-54272"},
+                                ],
+                                "permalink": "https://github.com/advisories/GHSA-ip-addr",
+                                "summary": "ip-address vuln",
+                                "withdrawnAt": None,
+                            },
+                        }
+                    ]
+                }
+            }
+
+    original_client = npm_audit.Client
+    original_transport = npm_audit.AIOHTTPTransport
+    original_search = npm_audit.searchCVE
+    original_urlopen = npm_audit.urllib.request.urlopen
+    npm_audit.Client = lambda *args, **kwargs: FakeClient()
+    npm_audit.AIOHTTPTransport = lambda *args, **kwargs: object()
+    npm_audit.searchCVE = lambda *args, **kwargs: [FakeCve()]
+    npm_audit.urllib.request.urlopen = lambda *args, **kwargs: type("R", (), {"__enter__": lambda self: self, "__exit__": lambda self, exc_type, exc, tb: False, "read": lambda self: b'{"data": []}'})()
+    try:
+        checker = NPMAuditChecker(Path("/tmp"), timeout=60, gh_token="token", nvd_key="nvd")
+        vulns = checker.query_installed_package_vulnerabilities(
+            Path("/tmp/deps/npm"),
+            [{"name": "ip-address", "version": "10.2.0"}],
+            Vulnerability,
+        )
+        assert len(vulns) == 1, vulns
+        assert vulns[0].id == "CVE-2026-54272"
+        assert vulns[0].advisory_aliases == ["GHSA-ip-addr"]
+        assert vulns[0].url == "https://nvd.nist.gov/vuln/detail/CVE-2026-54272"
+    finally:
+        npm_audit.Client = original_client
+        npm_audit.AIOHTTPTransport = original_transport
+        npm_audit.urllib.request.urlopen = original_urlopen
+        npm_audit.searchCVE = original_search
+
+
+def test_fetch_global_advisories_returns_empty_for_non_list_payload() -> None:
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{}'
+
+    original_urlopen = npm_audit.urllib.request.urlopen
+    npm_audit.urllib.request.urlopen = lambda *args, **kwargs: FakeResponse()
+    try:
+        checker = NPMAuditChecker(Path("/tmp"), timeout=60, gh_token="token")
+        assert checker.fetch_global_advisories([{"name": "example", "version": "1.0.0"}]) == []
+    finally:
+        npm_audit.urllib.request.urlopen = original_urlopen
+
+
+
+def test_fetch_global_advisories_uses_repeated_affects_params() -> None:
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'[]'
+
+    seen = {}
+    original_urlopen = npm_audit.urllib.request.urlopen
+
+    def fake_urlopen(request, timeout=None):
+        seen["url"] = request.full_url
+        return FakeResponse()
+
+    npm_audit.urllib.request.urlopen = fake_urlopen
+    try:
+        checker = NPMAuditChecker(Path("/tmp"), timeout=60)
+        checker.fetch_global_advisories([
+            {"name": "ip-address", "version": "10.2.0"},
+            {"name": "lodash", "version": "4.17.21"},
+        ])
+        assert "affects%5B%5D=ip-address%4010.2.0" in seen["url"], seen
+        assert "affects%5B%5D=lodash%404.17.21" in seen["url"], seen
+    finally:
+        npm_audit.urllib.request.urlopen = original_urlopen
+
+def test_matching_graphql_and_global_advisories_merge_aliases() -> None:
+    class FakeClient:
+        def execute(self, query, variable_values):
+            return {
+                "securityVulnerabilities": {
+                    "nodes": [
+                        {
+                            "severity": "MODERATE",
+                            "vulnerableVersionRange": ">=10.1.1, <=10.2.0",
+                            "firstPatchedVersion": {"identifier": "10.2.1"},
+                            "advisory": {
+                                "ghsaId": "GHSA-22jq-vg5j-6vgg",
+                                "identifiers": [
+                                    {"type": "GHSA", "value": "GHSA-22jq-vg5j-6vgg"},
+                                    {"type": "CVE", "value": "CVE-2026-54272"},
+                                ],
+                                "permalink": "https://github.com/advisories/GHSA-22jq-vg5j-6vgg",
+                                "summary": "ip-address mapped/NAT64 bypass",
+                                "withdrawnAt": None,
+                            },
+                        }
+                    ]
+                }
+            }
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps([
+                {
+                    "ghsa_id": "GHSA-overlap-merge-test",
+                    "cve_id": "CVE-2026-54272",
+                    "html_url": "https://github.com/advisories/GHSA-overlap-merge-test",
+                    "severity": "moderate",
+                    "summary": "same advisory from global feed",
+                    "withdrawn_at": None,
+                    "identifiers": [
+                        {"type": "GHSA", "value": "GHSA-overlap-merge-test"},
+                        {"type": "CVE", "value": "CVE-2026-54272"},
+                    ],
+                    "vulnerabilities": [
+                        {
+                            "package": {"ecosystem": "npm", "name": "ip-address"},
+                            "vulnerable_version_range": ">=10.1.1, <=10.2.0",
+                            "first_patched_version": "10.2.1",
+                        }
+                    ],
+                }
+            ]).encode()
+
+    class FakeCve:
+        def __init__(self):
+            self.id = "CVE-2026-54272"
+            self.url = "https://nvd.nist.gov/vuln/detail/CVE-2026-54272"
+            self.metrics = None
+
+    original_client = npm_audit.Client
+    original_transport = npm_audit.AIOHTTPTransport
+    original_search = npm_audit.searchCVE
+    original_urlopen = npm_audit.urllib.request.urlopen
+    npm_audit.Client = lambda *args, **kwargs: FakeClient()
+    npm_audit.AIOHTTPTransport = lambda *args, **kwargs: object()
+    npm_audit.searchCVE = lambda *args, **kwargs: [FakeCve()]
+    npm_audit.urllib.request.urlopen = lambda *args, **kwargs: FakeResponse()
+    try:
+        checker = NPMAuditChecker(Path("/tmp"), timeout=60, gh_token="token")
+        vulns = checker.query_installed_package_vulnerabilities(
+            Path("/tmp/deps/npm"),
+            [{"name": "ip-address", "version": "10.2.0", "path": "node_modules/ip-address"}],
+            Vulnerability,
+        )
+        assert len(vulns) == 1, vulns
+        assert vulns[0].id == "CVE-2026-54272"
+        assert vulns[0].advisory_aliases == ["GHSA-22jq-vg5j-6vgg", "GHSA-overlap-merge-test"]
+    finally:
+        npm_audit.Client = original_client
+        npm_audit.AIOHTTPTransport = original_transport
+        npm_audit.searchCVE = original_search
+        npm_audit.urllib.request.urlopen = original_urlopen
+
+
+def test_global_advisories_are_merged_with_ghad_results() -> None:
+    class FakeClient:
+        def execute(self, query, variable_values):
+            return {
+                "securityVulnerabilities": {
+                    "nodes": [
+                        {
+                            "severity": "MODERATE",
+                            "vulnerableVersionRange": ">=10.1.1, <=10.2.0",
+                            "firstPatchedVersion": {"identifier": "10.2.1"},
+                            "advisory": {
+                                "ghsaId": "GHSA-22jq-vg5j-6vgg",
+                                "identifiers": [
+                                    {"type": "GHSA", "value": "GHSA-22jq-vg5j-6vgg"},
+                                    {"type": "CVE", "value": "CVE-2026-54272"},
+                                ],
+                                "permalink": "https://github.com/advisories/GHSA-22jq-vg5j-6vgg",
+                                "summary": "ip-address mapped/NAT64 bypass",
+                                "withdrawnAt": None,
+                            },
+                        }
+                    ]
+                }
+            }
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps([
+                {
+                    "ghsa_id": "GHSA-mwp4-54f8-5fhr",
+                    "cve_id": "CVE-2026-69192",
+                    "html_url": "https://github.com/advisories/GHSA-mwp4-54f8-5fhr",
+                    "severity": "high",
+                    "summary": "ip-address leading-zero octet parsing bypass",
+                    "state": "published",
+                    "withdrawn_at": None,
+                    "identifiers": [
+                        {"type": "GHSA", "value": "GHSA-mwp4-54f8-5fhr"},
+                        {"type": "CVE", "value": "CVE-2026-69192"},
+                    ],
+                    "vulnerabilities": [
+                        {
+                            "package": {"ecosystem": "npm", "name": "ip-address"},
+                            "vulnerable_version_range": "<=10.3.0",
+                            "first_patched_version": "10.3.1",
+                        }
+                    ],
+                },
+                {
+                    "ghsa_id": "GHSA-4xrf-jv44-h6hh",
+                    "cve_id": "CVE-2026-69198",
+                    "html_url": "https://github.com/advisories/GHSA-4xrf-jv44-h6hh",
+                    "severity": "medium",
+                    "summary": "ip-address CIDR suffix bypass",
+                    "state": "published",
+                    "withdrawn_at": None,
+                    "identifiers": [
+                        {"type": "GHSA", "value": "GHSA-4xrf-jv44-h6hh"},
+                        {"type": "CVE", "value": "CVE-2026-69198"},
+                    ],
+                    "vulnerabilities": [
+                        {
+                            "package": {"ecosystem": "npm", "name": "ip-address"},
+                            "vulnerable_version_range": ">=10.1.1, <=10.2.1",
+                            "first_patched_version": "10.2.2",
+                        }
+                    ],
+                },
+            ]).encode()
+
+    original_client = npm_audit.Client
+    original_transport = npm_audit.AIOHTTPTransport
+    original_search = npm_audit.searchCVE
+    original_urlopen = npm_audit.urllib.request.urlopen
+    npm_audit.Client = lambda *args, **kwargs: FakeClient()
+    npm_audit.AIOHTTPTransport = lambda *args, **kwargs: object()
+    npm_audit.searchCVE = lambda *args, **kwargs: []
+    npm_audit.urllib.request.urlopen = lambda *args, **kwargs: FakeResponse()
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_dir = Path(temp_dir) / "deps" / "npm"
+            write_package_json(
+                package_dir / "node_modules" / "ip-address" / "package.json",
+                {"name": "ip-address", "version": "10.2.0", "repository": "github:beaugunderson/ip-address"},
+            )
+            checker = NPMAuditChecker(Path(temp_dir), timeout=60, gh_token="token")
+            vulns = checker.query_installed_package_vulnerabilities(
+                package_dir,
+                [{"name": "ip-address", "version": "10.2.0", "path": "node_modules/ip-address"}],
+                Vulnerability,
+            )
+            ids = sorted(v.id for v in vulns)
+            assert ids == ["CVE-2026-54272", "CVE-2026-69192", "CVE-2026-69198"], vulns
+    finally:
+        npm_audit.Client = original_client
+        npm_audit.AIOHTTPTransport = original_transport
+        npm_audit.urllib.request.urlopen = original_urlopen
+        npm_audit.searchCVE = original_search
+
+
 def test_query_failure_is_skipped_per_package() -> None:
     class FakeClient:
         def execute(self, query, variable_values):
@@ -338,8 +642,10 @@ def test_query_failure_is_skipped_per_package() -> None:
 
     original_client = npm_audit.Client
     original_transport = npm_audit.AIOHTTPTransport
+    original_urlopen = npm_audit.urllib.request.urlopen
     npm_audit.Client = lambda *args, **kwargs: FakeClient()
     npm_audit.AIOHTTPTransport = lambda *args, **kwargs: object()
+    npm_audit.urllib.request.urlopen = lambda *args, **kwargs: type("R", (), {"__enter__": lambda self: self, "__exit__": lambda self, exc_type, exc, tb: False, "read": lambda self: b'{"data": []}'})()
     try:
         checker = NPMAuditChecker(Path("/tmp"), timeout=60, gh_token="token")
         vulns = checker.query_installed_package_vulnerabilities(
@@ -355,6 +661,7 @@ def test_query_failure_is_skipped_per_package() -> None:
     finally:
         npm_audit.Client = original_client
         npm_audit.AIOHTTPTransport = original_transport
+        npm_audit.urllib.request.urlopen = original_urlopen
 
 
 def test_invalid_advisory_range_or_version_is_skipped() -> None:
@@ -393,8 +700,10 @@ def test_invalid_advisory_range_or_version_is_skipped() -> None:
 
     original_client = npm_audit.Client
     original_transport = npm_audit.AIOHTTPTransport
+    original_urlopen = npm_audit.urllib.request.urlopen
     npm_audit.Client = lambda *args, **kwargs: FakeClient()
     npm_audit.AIOHTTPTransport = lambda *args, **kwargs: object()
+    npm_audit.urllib.request.urlopen = lambda *args, **kwargs: type("R", (), {"__enter__": lambda self: self, "__exit__": lambda self, exc_type, exc, tb: False, "read": lambda self: b'{"data": []}'})()
     try:
         checker = NPMAuditChecker(Path("/tmp"), timeout=60, gh_token="token")
         vulns = checker.query_installed_package_vulnerabilities(
@@ -407,6 +716,7 @@ def test_invalid_advisory_range_or_version_is_skipped() -> None:
     finally:
         npm_audit.Client = original_client
         npm_audit.AIOHTTPTransport = original_transport
+        npm_audit.urllib.request.urlopen = original_urlopen
 
 
 def test_normalize_npm_advisory_id() -> None:
@@ -474,45 +784,6 @@ def test_normalize_version_range() -> None:
     assert checker.normalize_version_range(">= 1.0.0, < 2.0.0") == ">= 1.0.0, < 2.0.0"
 
 
-def test_get_installed_bundle_packages_accepts_boolean_bundle_dependencies() -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        package_dir = Path(temp_dir) / "deps" / "npm"
-        write_package_json(
-            package_dir / "package.json",
-            {
-                "name": "npm",
-                "version": "11.18.0",
-                "bundleDependencies": True,
-                "dependencies": {"tar": "^7.5.19"},
-            },
-        )
-
-        checker = NPMAuditChecker(Path(temp_dir), timeout=60)
-        packages = checker.get_installed_bundle_packages(
-            package_dir,
-            {
-                "dependencies": {
-                    "tar": {
-                        "version": "7.5.19",
-                        "dependencies": {
-                            "minipass": {"version": "7.1.3"},
-                            "minipass_dup": {"version": "7.1.3"},
-                        },
-                    }
-                }
-            },
-        )
-        package_map = {pkg["name"]: pkg for pkg in packages}
-
-        assert sorted((pkg["name"], pkg["version"]) for pkg in packages) == [
-            ("minipass", "7.1.3"),
-            ("minipass_dup", "7.1.3"),
-            ("tar", "7.5.19"),
-        ]
-        assert package_map["tar"]["path"] == "node_modules/tar"
-        assert package_map["minipass"]["path"] == "node_modules/tar/node_modules/minipass"
-
-
 def test_get_installed_bundle_packages_traverses_duplicate_parent_subtrees() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         package_dir = Path(temp_dir) / "deps" / "npm"
@@ -551,6 +822,45 @@ def test_get_installed_bundle_packages_traverses_duplicate_parent_subtrees() -> 
 
         assert package_map["make-fetch-happen"]["path"] == "node_modules/wrapper/node_modules/make-fetch-happen"
         assert package_map["ip-address"]["path"] == "node_modules/make-fetch-happen/node_modules/ip-address"
+
+
+def test_get_installed_bundle_packages_accepts_boolean_bundle_dependencies() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        package_dir = Path(temp_dir) / "deps" / "npm"
+        write_package_json(
+            package_dir / "package.json",
+            {
+                "name": "npm",
+                "version": "11.18.0",
+                "bundleDependencies": True,
+                "dependencies": {"tar": "^7.5.19"},
+            },
+        )
+
+        checker = NPMAuditChecker(Path(temp_dir), timeout=60)
+        packages = checker.get_installed_bundle_packages(
+            package_dir,
+            {
+                "dependencies": {
+                    "tar": {
+                        "version": "7.5.19",
+                        "dependencies": {
+                            "minipass": {"version": "7.1.3"},
+                            "minipass_dup": {"version": "7.1.3"},
+                        },
+                    }
+                }
+            },
+        )
+        package_map = {pkg["name"]: pkg for pkg in packages}
+
+        assert sorted((pkg["name"], pkg["version"]) for pkg in packages) == [
+            ("minipass", "7.1.3"),
+            ("minipass_dup", "7.1.3"),
+            ("tar", "7.5.19"),
+        ]
+        assert package_map["tar"]["path"] == "node_modules/tar"
+        assert package_map["minipass"]["path"] == "node_modules/tar/node_modules/minipass"
 
 
 def test_npm_cli_uses_installed_tree() -> None:
@@ -614,6 +924,11 @@ def test_npm_audit_basic() -> None:
     test_no_lockfile_generates_lockfile_only_audit()
     test_enolock_with_node_modules_still_falls_back()
     test_enolock_falls_back_to_install_and_normal_audit()
+    test_nvd_primary_merges_ghad_aliases()
+    test_fetch_global_advisories_returns_empty_for_non_list_payload()
+    test_fetch_global_advisories_uses_repeated_affects_params()
+    test_matching_graphql_and_global_advisories_merge_aliases()
+    test_global_advisories_are_merged_with_ghad_results()
     test_query_failure_is_skipped_per_package()
     test_invalid_advisory_range_or_version_is_skipped()
     test_normalize_npm_advisory_id()
