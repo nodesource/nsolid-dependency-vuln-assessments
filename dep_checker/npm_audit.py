@@ -12,15 +12,21 @@ import json
 import subprocess
 import logging
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import List, Dict, Optional
 
 from gql import gql, Client
 from gql.transport.aiohttp import AIOHTTPTransport
+from nvdlib import searchCVE  # type: ignore
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion
 
 logger = logging.getLogger(__name__)
+
+GITHUB_API_VERSION = "2026-03-10"
 
 
 class AuditParseError(Exception):
@@ -80,10 +86,11 @@ EXCLUDE_PATHS = [
 class NPMAuditChecker:
     """Handles npm audit vulnerability checking for package.json files."""
 
-    def __init__(self, repo_path: Path, timeout: int = 300, gh_token: Optional[str] = None):
+    def __init__(self, repo_path: Path, timeout: int = 300, gh_token: Optional[str] = None, nvd_key: Optional[str] = None):
         self.repo_path = repo_path
         self.timeout = timeout
         self.gh_token = gh_token
+        self.nvd_key = nvd_key
         self.exclude_paths = EXCLUDE_PATHS
         # A failed package-level audit means the aggregate npm result is partial.
         # The caller uses this to prevent reconciliation from closing valid issues.
@@ -285,91 +292,297 @@ class NPMAuditChecker:
             roots = set(bundle_dependencies or [])
         seen: Dict[tuple[str, str], Dict[str, str]] = {}
 
-        def walk(name: str, node: Dict) -> None:
+        def walk(name: str, node: Dict, path_parts: Optional[list[str]] = None) -> None:
+            path_parts = path_parts or []
             version = node.get("version")
             if not version:
                 return
             key = (name, str(version))
-            if key in seen:
-                return
-            seen[key] = {"name": name, "version": str(version)}
+            package_path_parts = [*path_parts, "node_modules", name]
+            if key not in seen:
+                seen[key] = {"name": name, "version": str(version), "path": "/".join(package_path_parts)}
             for child_name, child in (node.get("dependencies") or {}).items():
                 if isinstance(child, dict):
-                    walk(child_name, child)
+                    walk(child_name, child, package_path_parts)
 
         for name, node in (tree_data.get("dependencies") or {}).items():
             if name in roots and isinstance(node, dict):
-                walk(name, node)
+                walk(name, node, [])
 
         return list(seen.values())
 
     def query_installed_package_vulnerabilities(
         self, package_dir: Path, packages: List[Dict[str, str]], vulnerability_class
     ) -> List:
-        """Query GitHub advisories for exact installed package versions."""
-        if self.gh_token is None:
-            raise RuntimeError("GitHub token is required to scan installed npm package trees")
-
-        transport = AIOHTTPTransport(
-            url="https://api.github.com/graphql",
-            headers={"Authorization": f"bearer {self.gh_token}"},
-        )
-        client = Client(
-            transport=transport,
-            fetch_schema_from_transport=True,
-            serialize_variables=True,
-            parse_results=True,
-        )
-
-        vulnerabilities = []
+        """Query NVD and GitHub advisories for exact installed package versions."""
+        vulnerabilities_by_id: Dict[str, object] = {}
+        ordered_vulnerabilities: List[object] = []
         main_dep_name = package_dir.name
         main_dep_path = str(package_dir.relative_to(self.repo_path))
 
-        for package in packages:
-            try:
-                result = client.execute(
-                    github_vulnerabilities_query,
-                    variable_values={"package_name": package["name"]},
-                )
-            except Exception as exc:
-                logger.warning(
-                    f"Skipping GitHub advisory query for {package['name']}@{package['version']}: {exc}"
-                )
-                continue
-            for vuln in result["securityVulnerabilities"]["nodes"]:
-                if vuln["advisory"]["withdrawnAt"] is not None:
+        def index_vulnerability(vuln) -> None:
+            aliases = list(dict.fromkeys(
+                alias for alias in (getattr(vuln, "advisory_aliases", []) or []) if alias != vuln.id
+            ))
+            setattr(vuln, "advisory_aliases", aliases)
+            for candidate_id in [vuln.id, *aliases]:
+                vulnerabilities_by_id[candidate_id] = vuln
+
+        def merge_vulnerability(vuln) -> None:
+            candidate_ids = [vuln.id, *(getattr(vuln, "advisory_aliases", []) or [])]
+            for candidate_id in candidate_ids:
+                existing = vulnerabilities_by_id.get(candidate_id)
+                if existing is None:
                     continue
+                aliases = list(getattr(existing, "advisory_aliases", []) or [])
+                for alias in [vuln.id, *(getattr(vuln, "advisory_aliases", []) or [])]:
+                    if alias != existing.id and alias not in aliases:
+                        aliases.append(alias)
+                setattr(existing, "advisory_aliases", aliases)
+                index_vulnerability(existing)
+                return
+            index_vulnerability(vuln)
+            ordered_vulnerabilities.append(vuln)
+
+        packages_for_global_advisories = list(packages)
+        if self.gh_token is not None:
+            transport = AIOHTTPTransport(
+                url="https://api.github.com/graphql",
+                headers={"Authorization": f"bearer {self.gh_token}"},
+            )
+            client = Client(
+                transport=transport,
+                fetch_schema_from_transport=True,
+                serialize_variables=True,
+                parse_results=True,
+            )
+
+            for package in packages:
                 try:
-                    vulnerable_range = self.normalize_version_range(vuln["vulnerableVersionRange"])
-                    if not SpecifierSet(vulnerable_range).contains(package["version"], prereleases=True):
-                        continue
-                except (InvalidSpecifier, InvalidVersion) as exc:
+                    result = client.execute(
+                        github_vulnerabilities_query,
+                        variable_values={"package_name": package["name"]},
+                    )
+                except Exception as exc:
                     self.failed_packages.append(
-                        f"{package_dir}: invalid advisory match for {package['name']}@{package['version']}: {exc}"
+                        f"{package_dir}: GitHub advisory query failed for {package['name']}@{package['version']}: {exc}"
                     )
                     logger.warning(
-                        f"Skipping advisory match for {package['name']}@{package['version']}: {exc}"
+                        f"Skipping GitHub advisory query for {package['name']}@{package['version']}: {exc}"
                     )
                     continue
-                preferred_id = self.preferred_advisory_id(vuln["advisory"])
-                vulnerabilities.append(
+                for vuln in result["securityVulnerabilities"]["nodes"]:
+                    if vuln["advisory"]["withdrawnAt"] is not None:
+                        continue
+                    try:
+                        vulnerable_range = self.normalize_version_range(vuln["vulnerableVersionRange"])
+                        if not SpecifierSet(vulnerable_range).contains(package["version"], prereleases=True):
+                            continue
+                    except (InvalidSpecifier, InvalidVersion) as exc:
+                        self.failed_packages.append(
+                            f"{package_dir}: invalid advisory match for {package['name']}@{package['version']}: {exc}"
+                        )
+                        logger.warning(
+                            f"Skipping advisory match for {package['name']}@{package['version']}: {exc}"
+                        )
+                        continue
+                    preferred_id = self.preferred_advisory_id(vuln["advisory"])
+                    merge_vulnerability(
+                        vulnerability_class(
+                            id=preferred_id,
+                            url=vuln["advisory"]["permalink"],
+                            dependency=package["name"],
+                            version=package["version"],
+                            source="npm",
+                            severity=vuln.get("severity"),
+                            via=[vuln["advisory"]["summary"]] if vuln["advisory"].get("summary") else [],
+                            fix_available=vuln.get("firstPatchedVersion") is not None,
+                            main_dep_name=main_dep_name,
+                            main_dep_path=main_dep_path,
+                            advisory_aliases=self.advisory_aliases(vuln["advisory"], preferred_id),
+                        )
+                    )
+        try:
+            global_advisories = self.fetch_global_advisories(packages_for_global_advisories)
+        except Exception as exc:
+            self.failed_packages.append(
+                f"{package_dir}: global advisory query failed: {exc}"
+            )
+            logger.warning(f"Skipping global advisory query for {package_dir}: {exc}")
+            global_advisories = []
+
+        for package in packages_for_global_advisories:
+            matched_global = self.match_global_advisories(package, global_advisories)
+            for vuln in matched_global:
+                merge_vulnerability(
                     vulnerability_class(
-                        id=preferred_id,
-                        url=vuln["advisory"]["permalink"],
+                        id=vuln["id"],
+                        url=vuln["url"],
                         dependency=package["name"],
                         version=package["version"],
                         source="npm",
                         severity=vuln.get("severity"),
-                        via=[vuln["advisory"]["summary"]] if vuln["advisory"].get("summary") else [],
-                        fix_available=vuln.get("firstPatchedVersion") is not None,
+                        via=[vuln["summary"]] if vuln.get("summary") else [],
+                        fix_available=vuln.get("fix_available"),
                         main_dep_name=main_dep_name,
                         main_dep_path=main_dep_path,
-                        advisory_aliases=self.advisory_aliases(vuln["advisory"], preferred_id),
+                        advisory_aliases=vuln.get("aliases", []),
                     )
                 )
 
-        logger.info(f"Parsed {len(vulnerabilities)} GitHub advisory matches from {package_dir}")
-        return vulnerabilities
+        processed_cve_ids: set[str] = set()
+        for package in packages:
+            for vuln in list(vulnerabilities_by_id.values()):
+                if vuln.dependency != package["name"] or not str(vuln.id).startswith("CVE-"):
+                    continue
+                if vuln.id in processed_cve_ids:
+                    continue
+                try:
+                    query_kwargs = {
+                        "cveId": vuln.id,
+                        "key": self.nvd_key,
+                    }
+                    if self.nvd_key:
+                        query_kwargs["delay"] = 6
+                    matches = searchCVE(**query_kwargs)
+                    processed_cve_ids.add(vuln.id)
+                except Exception as exc:
+                    self.failed_packages.append(
+                        f"{package_dir}: NVD enrichment failed for {package['name']}@{package['version']} {vuln.id}: {exc}"
+                    )
+                    logger.warning(
+                        f"Skipping NVD enrichment for {package['name']}@{package['version']} {vuln.id}: {exc}"
+                    )
+                    continue
+                if not matches:
+                    continue
+                cve = matches[0]
+                try:
+                    severity = None
+                    if hasattr(cve, "metrics") and cve.metrics:
+                        if hasattr(cve.metrics, 'cvssMetricV31') and cve.metrics.cvssMetricV31:
+                            severity = cve.metrics.cvssMetricV31[0].cvssData.baseSeverity
+                        elif hasattr(cve.metrics, 'cvssMetricV30') and cve.metrics.cvssMetricV30:
+                            severity = cve.metrics.cvssMetricV30[0].cvssData.baseSeverity
+                        elif hasattr(cve.metrics, 'cvssMetricV2') and cve.metrics.cvssMetricV2:
+                            base_score = cve.metrics.cvssMetricV2[0].cvssData.baseScore
+                            severity = "HIGH" if base_score >= 7.0 else "MEDIUM" if base_score >= 4.0 else "LOW"
+                except (AttributeError, IndexError, TypeError):
+                    severity = None
+                if severity is not None:
+                    vuln.severity = str(severity).upper()
+                if getattr(cve, 'url', None):
+                    vuln.url = cve.url
+
+        return ordered_vulnerabilities
+
+    def match_global_advisories(self, package: Dict[str, str], advisories: List[Dict]) -> List[Dict[str, object]]:
+        results: List[Dict[str, object]] = []
+        seen_ids: set[str] = set()
+        for advisory in advisories:
+            if advisory.get("withdrawn_at") is not None:
+                continue
+            preferred_id = advisory.get("cve_id") or self.preferred_global_advisory_cve(advisory) or advisory.get("ghsa_id")
+            if not preferred_id or preferred_id in seen_ids:
+                continue
+            aliases = self.global_advisory_aliases(advisory, preferred_id)
+            for vuln in advisory.get("vulnerabilities") or []:
+                package_info = vuln.get("package") or {}
+                if package_info.get("ecosystem") != "npm" or package_info.get("name") != package["name"]:
+                    continue
+                try:
+                    vulnerable_range = self.normalize_version_range(vuln.get("vulnerable_version_range") or "")
+                    matched = bool(vulnerable_range) and SpecifierSet(vulnerable_range).contains(package["version"], prereleases=True)
+                    if not matched:
+                        continue
+                except (InvalidSpecifier, InvalidVersion):
+                    continue
+                seen_ids.add(preferred_id)
+                results.append({
+                    "id": preferred_id,
+                    "url": advisory.get("html_url") or advisory.get("url") or f"https://github.com/advisories/{advisory.get('ghsa_id', preferred_id)}",
+                    "severity": str(advisory.get("severity") or "").upper() or None,
+                    "summary": advisory.get("summary") or "",
+                    "aliases": aliases,
+                    "fix_available": bool(vuln.get("first_patched_version") or vuln.get("patched_versions")),
+                })
+        return results
+
+    def fetch_global_advisories(self, packages: List[Dict[str, str]]) -> List[Dict]:
+        if not packages:
+            return []
+        cache = getattr(self, "_global_advisory_cache", None)
+        if cache is None:
+            cache = self._global_advisory_cache = {}
+        requested = tuple(sorted({f"{package['name']}@{package['version']}" for package in packages}))
+        if requested in cache:
+            return cache[requested]
+
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": GITHUB_API_VERSION,
+            "User-Agent": "nsolid-dependency-vuln-assessments",
+        }
+        if self.gh_token is not None:
+            headers["Authorization"] = f"bearer {self.gh_token}"
+        advisories: List[Dict] = []
+        seen_ids: set[str] = set()
+        batch_size = 25
+
+        for index in range(0, len(requested), batch_size):
+            batch = requested[index:index + batch_size]
+            query = urllib.parse.urlencode(
+                [("ecosystem", "npm"), *(("affects[]", item) for item in batch), ("per_page", "100")]
+            )
+            next_url = f"https://api.github.com/advisories?{query}"
+            batch_payloads: List[Dict] | None = []
+            while next_url is not None:
+                request = urllib.request.Request(next_url, headers=headers)
+                with urllib.request.urlopen(request, timeout=min(self.timeout, 30)) as response:
+                    payload = json.load(response)
+                    link_header = getattr(response, "headers", {}).get("Link")
+                if not isinstance(payload, list):
+                    logger.warning(
+                        f"Global advisory query returned non-list payload for batch {index // batch_size + 1} of {((len(requested) - 1) // batch_size) + 1}: {payload}"
+                    )
+                    batch_payloads = None
+                    break
+                batch_payloads.extend(item for item in payload if isinstance(item, dict))
+                next_url = None
+                if link_header:
+                    for part in link_header.split(","):
+                        match = re.match(r'\s*<([^>]+)>;\s*rel="([^"]+)"', part)
+                        if match and match.group(2) == "next":
+                            next_url = match.group(1)
+                            break
+            if batch_payloads is None:
+                continue
+            for item in batch_payloads:
+                advisory_id = item.get("ghsa_id") or item.get("cve_id") or id(item)
+                if advisory_id in seen_ids:
+                    continue
+                seen_ids.add(advisory_id)
+                advisories.append(item)
+
+        cache[requested] = advisories
+        return advisories
+
+    def preferred_global_advisory_cve(self, advisory: Dict) -> Optional[str]:
+        for identifier in advisory.get("identifiers") or []:
+            if identifier.get("type") == "CVE" and identifier.get("value"):
+                return identifier["value"]
+        return None
+
+    def global_advisory_aliases(self, advisory: Dict, preferred_id: str) -> list[str]:
+        aliases: list[str] = []
+        ghsa_id = advisory.get("ghsa_id")
+        if isinstance(ghsa_id, str) and ghsa_id and ghsa_id != preferred_id:
+            aliases.append(ghsa_id)
+        for identifier in advisory.get("identifiers") or []:
+            value = identifier.get("value")
+            if value and value != preferred_id and value not in aliases:
+                aliases.append(value)
+        return aliases
 
     def normalize_version_range(self, version_range: str) -> str:
         """Normalize GitHub advisory version syntax to packaging-compatible specifiers."""
