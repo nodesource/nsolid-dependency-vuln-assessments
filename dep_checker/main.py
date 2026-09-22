@@ -154,6 +154,55 @@ def merge_vulnerabilities(vulnerabilities: list[Vulnerability]) -> list[Vulnerab
     return ordered
 
 
+def load_openvex_exemptions(repo_path: Path) -> set[str]:
+    """Load CVEs marked not_affected or fixed by the repository's OpenVEX document."""
+    exemptions: set[str] = set()
+    paths = (
+        repo_path / "tools" / "vex" / "nsolid.openvex.json",
+        repo_path / "share" / "doc" / "nsolid" / "nsolid.openvex.json",
+    )
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            document = json.loads(path.read_text())
+            statements = document.get("statements", [])
+            loaded = 0
+            for statement in statements:
+                if statement.get("status") in {"not_affected", "fixed"}:
+                    name = statement.get("vulnerability", {}).get("name")
+                    if isinstance(name, str):
+                        exemptions.add(name)
+                        loaded += 1
+            print(
+                f"Info: loaded {loaded} OpenVEX exemptions from {path}",
+                file=sys.stderr,
+            )
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError) as exc:
+            print(f"Warning: unable to read OpenVEX document {path}: {exc}", file=sys.stderr)
+    return exemptions
+
+
+def filter_openvex_exemptions(
+    vulnerabilities: list[Vulnerability], exemptions: set[str]
+) -> list[Vulnerability]:
+    filtered = []
+    for vuln in vulnerabilities:
+        if any(candidate in exemptions for candidate in [vuln.id, *vuln.advisory_aliases]):
+            print(
+                f"Info: OpenVEX exemption applied to {vuln.id} ({vuln.dependency})",
+                file=sys.stderr,
+            )
+            continue
+        filtered.append(vuln)
+    if len(filtered) != len(vulnerabilities):
+        print(
+            f"Info: OpenVEX filtered {len(vulnerabilities) - len(filtered)} vulnerability findings",
+            file=sys.stderr,
+        )
+    return filtered
+
+
 def resolve_dependencies(
     repo_path: Path, repo_branch: str
 ) -> tuple[dict[str, Dependency], list[str]]:
@@ -473,6 +522,11 @@ def main() -> int:
     merged_vulnerabilities = merge_vulnerabilities(
         ghad_vulnerabilities + nvd_vulnerabilities + npm_vulnerabilities
     )
+    openvex_exemptions = load_openvex_exemptions(repo_path)
+    if openvex_exemptions:
+        merged_vulnerabilities = filter_openvex_exemptions(
+            merged_vulnerabilities, openvex_exemptions
+        )
     all_vulnerabilities = {
         "vulnerabilities": merged_vulnerabilities,
         "scan_complete": scan_complete,
