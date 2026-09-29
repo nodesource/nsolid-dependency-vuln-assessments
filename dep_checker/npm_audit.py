@@ -352,7 +352,7 @@ class NPMAuditChecker:
             )
             client = Client(
                 transport=transport,
-                fetch_schema_from_transport=True,
+                fetch_schema_from_transport=False,
                 serialize_variables=True,
                 parse_results=True,
             )
