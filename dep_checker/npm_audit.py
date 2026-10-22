@@ -658,13 +658,11 @@ class NPMAuditChecker:
             normalized = advisory_id.strip()
             if normalized.startswith("GHSA-") or normalized.startswith("CVE-"):
                 return normalized
-            if normalized.isdigit():
-                return f"npm-{normalized}"
             if normalized:
-                return f"npm-{normalized}"
+                return normalized
         elif advisory_id is not None:
-            return f"npm-{advisory_id}"
-        return f"npm-{fallback_name}"
+            return str(advisory_id)
+        return fallback_name
 
     def parse_audit_results(self, audit_data: Dict, package_dir: Path, vulnerability_class) -> Optional[List]:
         """Parse npm audit JSON output, returning None when it is incomplete or invalid."""
@@ -719,25 +717,11 @@ class NPMAuditChecker:
                                             fix_available=bool(fix_available),
                                             main_dep_name=main_dep_name,
                                             main_dep_path=main_dep_path,
-                                        )
-                                    )
-                                elif isinstance(via_item, str):
-                                    vulnerabilities.append(
-                                        vulnerability_class(
-                                            id=self.normalize_npm_advisory_id(via_item, vuln_name),
-                                            url=f"https://github.com/advisories?query={via_item}",
-                                            dependency=vuln_name,
-                                            version=str(range_info),
-                                            source="npm",
-                                            severity=severity,
-                                            via=[str(via_item)],
-                                            fix_available=bool(fix_available),
-                                            main_dep_name=main_dep_name,
-                                            main_dep_path=main_dep_path,
+                                            advisory_aliases=aliases,
                                         )
                                     )
                                 else:
-                                    raise ValueError("vulnerability via item is not an object or string")
+                                    continue
                         else:
                             vulnerabilities.append(
                                 vulnerability_class(
