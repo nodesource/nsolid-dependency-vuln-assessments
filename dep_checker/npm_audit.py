@@ -605,6 +605,53 @@ class NPMAuditChecker:
             aliases.append(value)
         return aliases
 
+    def resolve_npm_advisory_id(
+        self, advisory_id: object, advisory_url: Optional[str], fallback_name: str
+    ) -> tuple[str, list[str]]:
+        fallback = self.normalize_npm_advisory_id(advisory_id, fallback_name)
+        ghsa_match = re.search(r"GHSA-[a-z0-9-]+", advisory_url or "", re.IGNORECASE)
+        if ghsa_match is None:
+            return fallback, []
+
+        ghsa_id = ghsa_match.group(0).upper()
+        cache = getattr(self, "_advisory_id_cache", None)
+        if cache is None:
+            cache = self._advisory_id_cache = {}
+        if ghsa_id not in cache:
+            request = urllib.request.Request(
+                f"https://api.github.com/advisories/{ghsa_id}",
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": GITHUB_API_VERSION,
+                    "User-Agent": "nsolid-dependency-vuln-assessments",
+                },
+            )
+            if self.gh_token is not None:
+                request.add_header("Authorization", f"bearer {self.gh_token}")
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    advisory = json.loads(response.read())
+                cve_id = advisory.get("cve_id")
+                if not cve_id:
+                    for identifier in advisory.get("identifiers") or []:
+                        if identifier.get("type") == "CVE":
+                            cve_id = identifier.get("value")
+                            break
+                cache[ghsa_id] = cve_id or fallback
+            except Exception as exc:
+                logger.warning("Unable to resolve CVE for %s: %s", ghsa_id, exc)
+                cache[ghsa_id] = fallback
+
+        preferred_id = cache[ghsa_id]
+        aliases = [ghsa_id] if ghsa_id != preferred_id else []
+        if fallback != preferred_id and fallback not in aliases:
+            aliases.append(fallback)
+        legacy_id = f"npm-{fallback}" if not fallback.startswith(("CVE-", "GHSA-")) else None
+        if legacy_id and legacy_id not in aliases:
+            aliases.append(legacy_id)
+        return preferred_id, aliases
+
+
     def normalize_npm_advisory_id(self, advisory_id: object, fallback_name: str) -> str:
         """Normalize npm audit advisory identifiers across modern and legacy payloads."""
         if isinstance(advisory_id, str):
@@ -655,8 +702,10 @@ class NPMAuditChecker:
                                     advisory_title = via_item.get("title", "")
                                     advisory_severity = via_item.get("severity", severity)
 
-                                    vuln_id = self.normalize_npm_advisory_id(advisory_id, vuln_name)
                                     url = advisory_url or f"https://github.com/advisories?query={vuln_name}"
+                                    vuln_id, aliases = self.resolve_npm_advisory_id(
+                                        advisory_id, url, vuln_name
+                                    )
 
                                     vulnerabilities.append(
                                         vulnerability_class(
