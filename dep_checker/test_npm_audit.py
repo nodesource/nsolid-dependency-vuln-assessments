@@ -228,6 +228,31 @@ def test_no_lockfile_generates_lockfile_only_audit() -> None:
     assert ["npm", "audit", "--omit=dev", "--json"] not in calls
 
 
+def test_no_prod_dependencies_skips_install() -> None:
+    def fake_run(cmd, **kwargs):
+        raise AssertionError(cmd)
+
+    original_run = npm_audit.subprocess.run
+    npm_audit.subprocess.run = fake_run
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Like deps/corepack: dev-only, with a Yarn spec npm can't install.
+            write_package_json(
+                Path(temp_dir) / "deps" / "corepack" / "package.json",
+                {
+                    "name": "corepack",
+                    "version": "0.34.7",
+                    "devDependencies": {"clipanion": "patch:clipanion@npm%3A3.2.1#~/.yarn/patches/x.patch"},
+                },
+            )
+
+            checker = NPMAuditChecker(Path(temp_dir), timeout=60)
+            assert checker.check_npm_vulnerabilities(Vulnerability) == []
+            assert checker.failed_packages == [], checker.failed_packages
+    finally:
+        npm_audit.subprocess.run = original_run
+
+
 def test_enolock_with_node_modules_still_falls_back() -> None:
     calls = []
 
@@ -922,6 +947,7 @@ def test_npm_audit_basic() -> None:
     test_lockfile_skips_install()
     test_node_modules_skips_install_and_lockfile_only()
     test_no_lockfile_generates_lockfile_only_audit()
+    test_no_prod_dependencies_skips_install()
     test_enolock_with_node_modules_still_falls_back()
     test_enolock_falls_back_to_install_and_normal_audit()
     test_nvd_primary_merges_ghad_aliases()

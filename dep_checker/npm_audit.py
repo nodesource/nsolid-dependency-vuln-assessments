@@ -157,6 +157,11 @@ class NPMAuditChecker:
     def has_node_modules(self, package_dir: Path) -> bool:
         return (package_dir / "node_modules").is_dir()
 
+    def has_prod_dependencies(self, package_dir: Path) -> bool:
+        """True when an --omit=dev install would install anything."""
+        manifest = json.loads((package_dir / "package.json").read_text())
+        return any(manifest.get(key) for key in ("dependencies", "optionalDependencies", "peerDependencies"))
+
     def is_npm_cli_checkout(self, package_dir: Path) -> bool:
         return package_dir == self.repo_path / "deps" / "npm"
 
@@ -800,6 +805,12 @@ class NPMAuditChecker:
                     continue
 
                 package_lock_only = has_package_lock and not has_node_modules
+
+                if not has_node_modules and not has_package_lock and not self.has_prod_dependencies(package_dir):
+                    # Nothing to audit with --omit=dev, and npm can fail on dev-only specs
+                    # such as corepack's Yarn "patch:" protocol.
+                    logger.info(f"Skipping {package_dir}: no production dependencies to audit")
+                    continue
 
                 if not has_node_modules and not has_package_lock:
                     if not self.run_npm_install(package_dir):
