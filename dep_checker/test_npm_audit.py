@@ -748,9 +748,9 @@ def test_normalize_npm_advisory_id() -> None:
     checker = NPMAuditChecker(Path("/tmp"), timeout=60)
     assert checker.normalize_npm_advisory_id("GHSA-test", "pkg") == "GHSA-test"
     assert checker.normalize_npm_advisory_id("CVE-2026-12345", "pkg") == "CVE-2026-12345"
-    assert checker.normalize_npm_advisory_id("12345", "pkg") == "npm-12345"
-    assert checker.normalize_npm_advisory_id("other-source", "pkg") == "npm-other-source"
-    assert checker.normalize_npm_advisory_id(None, "pkg") == "npm-pkg"
+    assert checker.normalize_npm_advisory_id("12345", "pkg") == "12345"
+    assert checker.normalize_npm_advisory_id("other-source", "pkg") == "other-source"
+    assert checker.normalize_npm_advisory_id(None, "pkg") == "pkg"
 
 
 def test_parse_audit_results_normalizes_ids() -> None:
@@ -778,14 +778,38 @@ def test_parse_audit_results_normalizes_ids() -> None:
         },
     }
     vulns = checker.parse_audit_results(audit_data, Path("/tmp/deps/pkg"), Vulnerability)
-    assert [v.id for v in vulns] == ["npm-12345", "GHSA-aaaa-bbbb-cccc", "CVE-2026-12345"]
+    assert [v.id for v in vulns] == ["12345", "GHSA-aaaa-bbbb-cccc"]
 
     legacy = checker.parse_audit_results(
         {"advisories": {"67890": {"module_name": "bar", "severity": "moderate", "title": "legacy", "patched_versions": ">1.0.0"}}},
         Path("/tmp/deps/pkg"),
         Vulnerability,
     )
-    assert [v.id for v in legacy] == ["npm-67890"]
+    assert [v.id for v in legacy] == ["67890"]
+
+
+def test_npm_advisory_prefers_linked_cve() -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"cve_id": "CVE-2026-12345"}).encode()
+
+    original_urlopen = npm_audit.urllib.request.urlopen
+    npm_audit.urllib.request.urlopen = lambda *args, **kwargs: Response()
+    try:
+        checker = NPMAuditChecker(Path("/tmp"), gh_token="token")
+        assert checker.resolve_npm_advisory_id(
+            1240992,
+            "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+            "braces",
+        ) == ("CVE-2026-12345", ["GHSA-VFJ7-8CJW-P6XM", "1240992", "npm-1240992"])
+    finally:
+        npm_audit.urllib.request.urlopen = original_urlopen
 
 
 def test_preferred_advisory_id() -> None:
@@ -959,6 +983,7 @@ def test_npm_audit_basic() -> None:
     test_invalid_advisory_range_or_version_is_skipped()
     test_normalize_npm_advisory_id()
     test_parse_audit_results_normalizes_ids()
+    test_npm_advisory_prefers_linked_cve()
     test_preferred_advisory_id()
     test_normalize_version_range()
     test_get_installed_bundle_packages_traverses_duplicate_parent_subtrees()
